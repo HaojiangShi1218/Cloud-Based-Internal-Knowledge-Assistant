@@ -1,0 +1,63 @@
+# ========================
+# Environment & Secrets
+# ========================
+.env
+.env.*
+*.key
+*.pem
+
+# ========================
+# Python
+# ========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ========================
+# Virtual Environments
+# ========================
+venv/
+.env/
+.venv/
+pip-wheel-metadata/
+
+# ========================
+# Logs & Runtime Files
+# ========================
+*.log
+logs/
+*.pid
+
+# ========================
+# OS / Editor
+# ========================
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# ========================
+# Testing / Coverage
+# ========================
+.coverage
+htmlcov/
+.pytest_cache/
+
+# ========================
+# Data & Vector Stores
+# ========================
+data/
+*.index
+*.faiss
+
+# ========================
+# Node / Frontend (if added later)
+# ========================
+node_modules/
+npm-debug.log*
+yarn-error.log*
