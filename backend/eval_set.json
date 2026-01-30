@@ -1,0 +1,138 @@
+{
+  "name": "Cloud-Based Internal Knowledge Assistant — MVP Eval Set",
+  "version": "0.1",
+  "notes": [
+    "This eval set checks retrieval quality (not generation).",
+    "Pass condition: at least one expected_source appears in top_k retrieved hits.",
+    "Optional: expected_contains can be used to require a key phrase to appear in retrieved text."
+  ],
+  "cases": [
+    {
+      "id": "glossary_p95",
+      "question": "What is p95 latency?",
+      "expected_sources": [
+        "Glossary.pdf"
+      ],
+      "expected_contains": [
+        "95th percentile",
+        "tail latency"
+      ]
+    },
+    {
+      "id": "glossary_rag",
+      "question": "What does RAG stand for and what does it mean?",
+      "expected_sources": [
+        "Glossary.pdf"
+      ],
+      "expected_contains": [
+        "Retrieval-Augmented Generation"
+      ]
+    },
+    {
+      "id": "glossary_faiss",
+      "question": "What is FAISS used for in this project?",
+      "expected_sources": [
+        "Glossary.pdf"
+      ],
+      "expected_contains": [
+        "similarity search"
+      ]
+    },
+    {
+      "id": "req_functional_list",
+      "question": "List the functional requirements of the system.",
+      "expected_sources": [
+        "Requirements.pdf"
+      ],
+      "expected_contains": [
+        "FR-01",
+        "FR-04"
+      ]
+    },
+    {
+      "id": "req_fr03",
+      "question": "What is FR-03?",
+      "expected_sources": [
+        "Requirements.pdf"
+      ],
+      "expected_contains": [
+        "FR-03"
+      ]
+    },
+    {
+      "id": "req_perf_p95_target",
+      "question": "What is the performance target for p95 response latency?",
+      "expected_sources": [
+        "Requirements.pdf",
+        "Glossary.pdf"
+      ],
+      "expected_contains": [
+        "p95",
+        "< 3 seconds"
+      ]
+    },
+    {
+      "id": "arch_goals",
+      "question": "What are the architectural goals of this system?",
+      "expected_sources": [
+        "Architecture.pdf"
+      ],
+      "expected_contains": [
+        "Architectural Goals"
+      ]
+    },
+    {
+      "id": "arch_components",
+      "question": "What are the high-level components of the system architecture?",
+      "expected_sources": [
+        "Architecture.pdf"
+      ],
+      "expected_contains": [
+        "High-Level Components"
+      ]
+    },
+    {
+      "id": "arch_data_flow",
+      "question": "Describe the end-to-end data flow of the system.",
+      "expected_sources": [
+        "Architecture.pdf"
+      ],
+      "expected_contains": [
+        "Data Flow",
+        "User submits question"
+      ]
+    },
+    {
+      "id": "arch_deployment",
+      "question": "What is the target deployment model and key technologies mentioned?",
+      "expected_sources": [
+        "Architecture.pdf",
+        "README.pdf"
+      ],
+      "expected_contains": [
+        "Deployment",
+        "AWS"
+      ]
+    },
+    {
+      "id": "readme_objectives",
+      "question": "What are the learning and career objectives of this project?",
+      "expected_sources": [
+        "README.pdf"
+      ],
+      "expected_contains": [
+        "Learning & Career Objectives"
+      ]
+    },
+    {
+      "id": "readme_status",
+      "question": "What is the current project status (what is done and what's next)?",
+      "expected_sources": [
+        "README.pdf"
+      ],
+      "expected_contains": [
+        "Project Status"
+      ]
+    }
+  ]
+}
