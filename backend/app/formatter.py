@@ -4,8 +4,8 @@ from typing import List, Dict, Any, Optional
 
 STRONG_SCORE = 0.55
 MAX_HITS_WEAK = 2
-MAX_SNIPPET_CHARS = 380
-MAX_ANSWER_CHARS = 380
+MAX_SNIPPET_CHARS = 2000
+MAX_ANSWER_CHARS = 1500
 
 
 def _clean(s: str) -> str:
@@ -20,9 +20,13 @@ def _clean(s: str) -> str:
 def _label(hit: Dict[str, Any]) -> str:
     src = hit.get("source", "unknown")
     p = hit.get("page_num")
+    pe = hit.get("page_end", p)
     ck = hit.get("chunk_index")
-    return f"{src} p.{p} — chunk {ck}" if p else f"{src} — chunk {ck}"
-
+    if p is None:
+        return f"{src} — chunk {ck}"
+    if pe is not None and pe != p:
+        return f"{src} p.{p}–{pe} — chunk {ck}"
+    return f"{src} p.{p} — chunk {ck}"
 
 def _first_sentences(text: str, n: int = 2) -> str:
     t = _clean(text)
@@ -155,7 +159,7 @@ def format_answer(hits: List[Dict[str, Any]], question: Optional[str] = None) ->
         answer_line = _extract_section_for_term(answer_hit.get("text", ""), term) if term else _first_sentences(answer_hit.get("text", ""), 2)
     else:
         answer_hit = hits[0]
-        answer_line = _first_sentences(answer_hit.get("text", ""), 2)
+        answer_line = _first_sentences(answer_hit.get("text", ""), 10)
 
     answer_line = _clean(answer_line)
     if len(answer_line) > MAX_ANSWER_CHARS:
@@ -181,11 +185,11 @@ def format_answer(hits: List[Dict[str, Any]], question: Optional[str] = None) ->
     for h in evidence_hits:
         if qtype == "definition":
             term = _extract_term(q)
-            snippet = _extract_section_for_term(h.get("text", ""), term) or _first_sentences(h.get("text", ""), 2)
+            snippet = _extract_section_for_term(h.get("text", ""), term) or _first_sentences(h.get("text", ""), 10)
         else:
-            snippet = _first_sentences(h.get("text", ""), 2)
+            snippet = _first_sentences(h.get("text", ""), 10)
         evidence_lines.append(f"- ({_label(h)}) {snippet}")
 
-    out = "Answer: " + (answer_line if answer_line else "See evidence below.")
+    out = "Answer: " + (answer_line if answer_line else "No exact answers found. See evidence below.")
     out += "\n\nEvidence:\n" + "\n".join(evidence_lines)
     return out

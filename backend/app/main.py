@@ -48,6 +48,7 @@ def ask(req: AskRequest):
             "rank": h["rank"],
             "source": h["source"],
             "page_num": h.get("page_num"),
+            "page_end": h.get("page_end"),
             "chunk_index": h["chunk_index"],
             "score": h["score"],
         }

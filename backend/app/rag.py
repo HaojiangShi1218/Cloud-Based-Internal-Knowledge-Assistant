@@ -51,6 +51,7 @@ def retrieve(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
             "score": score,
             "source": m["source"],
             "page_num": m.get("page_num"),
+            "page_end": m.get("page_end", m["page_num"]),
             "chunk_index": m["chunk_index"],
             "text": m["text"],
         })

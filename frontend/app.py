@@ -12,7 +12,8 @@ st.caption("Ask questions over your internal docs. Answers include citations for
 
 with st.sidebar:
     st.header("Settings")
-    mode = st.radio("Mode", ["Evidence Mode", "Synthesis Mode"], horizontal=True)
+    mode_label = st.radio("Mode", ["Evidence Mode", "Synthesis Mode"], horizontal=True)
+    mode = "extract" if mode_label == "Evidence Mode" else "llm"
     top_k = st.slider("Top K (citations)", min_value=1, max_value=10, value=5, step=1)
     st.text_input("Backend URL", value=BACKEND_URL, key="backend_url")
     st.divider()
@@ -23,7 +24,7 @@ with st.sidebar:
 
 question = st.text_area(
     "Your question",
-    placeholder="e.g., What does RAG stand for and what does it mean?",
+    placeholder="",
     height=90,
 )
 
@@ -38,11 +39,16 @@ if clear_btn:
     st.rerun()
 
 def call_backend(q: str, mode: str, top_k: int):
-    payload = {"question": q, "mode": mode, "top_k": top_k}
+    payload = {"question": q, "mode": mode, "top_k": int(top_k)}
     url = st.session_state.get("backend_url", BACKEND_URL).rstrip("/") + "/ask"
     r = requests.post(url, json=payload, timeout=60)
-    r.raise_for_status()
+
+    if r.status_code != 200:
+        # Show FastAPI's detailed validation error
+        raise RuntimeError(f"{r.status_code} {r.reason}: {r.text}")
+
     return r.json()
+
 
 if ask_btn:
     q = (question or "").strip()
