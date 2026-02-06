@@ -1,28 +1,206 @@
-from typing import List, Dict, Optional
+import json
+import re
+from typing import Any, Dict, List, Optional
+
 from openai import OpenAI
-from app.config import settings
+
 from app.cache import make_cache_key, get_cached_answer, set_cached_answer
+from app.config import settings
 
 SYSTEM_PROMPT = """You are a careful technical assistant.
-Answer ONLY using the provided context.
-If the answer is not contained in the context, say "I don’t know based on the provided documents."
-Keep answers concise and factual.
+Use only the provided context snippets and do not rely on outside knowledge.
+Return ONLY valid JSON (no markdown).
 """
 
-MAX_CONTEXT_CHARS = 6000  # MVP heuristic
+NO_ANSWER = "I don’t know based on the provided documents."
+MAX_HITS_FOR_LLM = 8
+MAX_CONTEXT_CHARS = 15000
+MAX_CHARS_PER_HIT = 2800
+MAX_CLAIMS = 8
 
-def build_context(hits: List[Dict]) -> str:
-    blocks = []
+_CITE_RE = re.compile(r"\[(\d+)\]")
+_WORD_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
+_YESNO_RE = re.compile(r"^\s*(is|are|was|were|do|does|did|can|could|should|would|will|has|have|had)\b", re.IGNORECASE)
+_STOPWORDS = {
+    "the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with", "is", "are", "was", "were",
+    "be", "as", "what", "which", "who", "whom", "this", "that", "these", "those", "it", "its", "from",
+    "by", "at", "into", "about", "how", "do", "does", "did", "can", "could", "should", "would",
+}
+
+
+def _clip(text: str, max_chars: int) -> str:
+    t = (text or "").strip()
+    if len(t) <= max_chars:
+        return t
+    return t[:max_chars].rstrip() + "..."
+
+
+def _tokens(s: str) -> List[str]:
+    toks = [t.lower() for t in _WORD_RE.findall(s or "")]
+    return [t for t in toks if len(t) >= 3 and t not in _STOPWORDS]
+
+
+def _is_yesno_question(question: str) -> bool:
+    return bool(_YESNO_RE.match(question or ""))
+
+
+def select_llm_hits(hits: List[Dict[str, Any]], max_hits: int = MAX_HITS_FOR_LLM) -> List[Dict[str, Any]]:
+    """
+    Keep a bounded citation-ID space for reliable [n] alignment.
+    """
+    out = [dict(h) for h in (hits or [])[:max_hits]]
+    for i, h in enumerate(out, start=1):
+        h["rank"] = i
+    return out
+
+
+def build_context(hits: List[Dict[str, Any]]) -> str:
+    blocks: List[str] = []
+    used = 0
     for h in hits:
         label = f"[{h['rank']}] {h['source']}"
         if h.get("page_num"):
             label += f" p.{h['page_num']}"
         label += f" chunk {h['chunk_index']}"
-        blocks.append(f"{label}\n{h['text']}".strip())
-    joined = "\n\n".join(blocks)
-    return joined[:MAX_CONTEXT_CHARS]
+        block = f"{label}\n{_clip(h.get('text', ''), MAX_CHARS_PER_HIT)}".strip()
+        size = len(block) + 2
+        if used + size > MAX_CONTEXT_CHARS:
+            break
+        blocks.append(block)
+        used += size
+    return "\n\n".join(blocks)
 
-def synthesize_answer(question: str, hits: List[Dict], max_tokens: int = 250) -> str:
+
+def _extract_json_object(raw: str) -> Optional[Dict[str, Any]]:
+    txt = (raw or "").strip()
+    if not txt:
+        return None
+    if txt == NO_ANSWER:
+        return {"final_answer": NO_ANSWER, "claims": []}
+
+    # strip fenced code blocks if present
+    txt = re.sub(r"^```(?:json)?\s*", "", txt, flags=re.IGNORECASE).strip()
+    txt = re.sub(r"\s*```$", "", txt).strip()
+
+    # direct parse
+    try:
+        obj = json.loads(txt)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        pass
+
+    # fallback: slice between first "{" and last "}"
+    start = txt.find("{")
+    end = txt.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        obj = json.loads(txt[start : end + 1])
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+def _claim_supported(claim: str, citation_ids: List[int], hits: List[Dict[str, Any]]) -> bool:
+    claim_toks = list(dict.fromkeys(_tokens(claim)))
+    if len(claim_toks) < 2:
+        return True
+
+    evidence = " ".join(
+        hits[i - 1].get("text", "")
+        for i in citation_ids
+        if 1 <= i <= len(hits)
+    )
+    if not evidence:
+        return False
+
+    ev_toks = set(_tokens(evidence))
+    if not ev_toks:
+        return False
+
+    overlap = sum(1 for t in claim_toks if t in ev_toks) / max(1, len(claim_toks))
+    if overlap >= 0.28:
+        return True
+
+    # Secondary acceptance for short, concrete claims.
+    if len(claim_toks) <= 4 and overlap >= 0.2:
+        return True
+
+    return False
+
+
+def _validate_payload(payload: Optional[Dict[str, Any]], hits: List[Dict[str, Any]], question: str) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+
+    final_answer = str(payload.get("final_answer", "")).strip()
+    if not final_answer:
+        return None
+    if final_answer == NO_ANSWER:
+        return {"final_answer": NO_ANSWER, "claims": []}
+
+    claims = payload.get("claims")
+    if not isinstance(claims, list) or not claims:
+        return None
+
+    if _is_yesno_question(question) and not re.match(r"^\s*(yes|no)\b", final_answer, flags=re.IGNORECASE):
+        return None
+
+    normalized_claims: List[Dict[str, Any]] = []
+    for claim_obj in claims[:MAX_CLAIMS]:
+        if not isinstance(claim_obj, dict):
+            return None
+        claim = str(claim_obj.get("claim", "")).strip()
+        citations_raw = claim_obj.get("citations")
+        if not claim or not isinstance(citations_raw, list):
+            return None
+
+        citation_ids: List[int] = []
+        for c in citations_raw:
+            if isinstance(c, int):
+                citation_ids.append(c)
+            elif isinstance(c, str) and c.isdigit():
+                citation_ids.append(int(c))
+
+        citation_ids = sorted(set(citation_ids))
+        if not citation_ids:
+            return None
+        if any(c < 1 or c > len(hits) for c in citation_ids):
+            return None
+        if not _claim_supported(claim, citation_ids, hits):
+            return None
+
+        normalized_claims.append({"claim": claim, "citations": citation_ids})
+
+    if not normalized_claims:
+        return None
+
+    return {"final_answer": final_answer, "claims": normalized_claims}
+
+
+def _render_answer(payload: Dict[str, Any]) -> str:
+    final_answer = payload["final_answer"].strip()
+    if final_answer == NO_ANSWER:
+        return NO_ANSWER
+
+    claims = payload.get("claims", [])
+    all_cites = sorted({c for cl in claims for c in cl.get("citations", [])})
+    if all_cites and not _CITE_RE.search(final_answer):
+        final_answer = f"{final_answer} " + "".join(f"[{i}]" for i in all_cites)
+
+    lines = [final_answer]
+    for cl in claims:
+        text = cl.get("claim", "").strip()
+        if not text:
+            continue
+        if text.lower() in final_answer.lower():
+            continue
+        cite = "".join(f"[{i}]" for i in cl.get("citations", []))
+        lines.append(f"- {text} {cite}".strip())
+    return "\n".join(lines)
+
+
+def synthesize_answer(question: str, hits: List[Dict[str, Any]], max_tokens: int = 250) -> str:
     if not hits:
         return ""
 
@@ -35,26 +213,60 @@ def synthesize_answer(question: str, hits: List[Dict], max_tokens: int = 250) ->
         return "LLM mode is not configured (missing OPENAI_API_KEY)."
 
     client = OpenAI(api_key=settings.OPENAI_API_KEY)
-
     context = build_context(hits)
+    is_yesno = _is_yesno_question(question)
+
     prompt = f"""Context:
 {context}
 
 Question:
 {question}
 
-Answer:"""
+Return JSON with this exact schema:
+{{
+  "final_answer": "string",
+  "claims": [
+    {{
+      "claim": "single grounded claim",
+      "citations": [1, 2]
+    }}
+  ]
+}}
 
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.0,
-        max_tokens=max_tokens,
-    )
+Rules:
+- Use only the context.
+- Every claim must cite at least one source id.
+- Do not use citation ids outside 1..{len(hits)}.
+- {"final_answer must start with Yes or No for this question." if is_yesno else "Keep final_answer concise and factual."}
+- If evidence is insufficient, return:
+  {{"final_answer":"{NO_ANSWER}","claims":[]}}
+- Output JSON only, no markdown.
+"""
 
-    answer = (resp.choices[0].message.content or "").strip()
+    def _generate(user_prompt: str) -> str:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0,
+            max_tokens=max_tokens,
+        )
+        return (resp.choices[0].message.content or "").strip()
+
+    answer = NO_ANSWER
+    retry_hints = [
+        "",
+        "\n\nReminder: output strict JSON only and every claim must cite source ids in range.",
+    ]
+    for hint in retry_hints:
+        raw = _generate(prompt + hint)
+        parsed = _extract_json_object(raw)
+        valid = _validate_payload(parsed, hits, question)
+        if valid:
+            answer = _render_answer(valid)
+            break
+
     set_cached_answer(cache_key, answer)
     return answer

@@ -6,7 +6,7 @@ from typing import Literal, Optional
 from app.config import settings
 from app.rag import retrieve
 from app.formatter import format_answer
-from app.llm import synthesize_answer
+from app.llm import select_llm_hits, synthesize_answer
 
 app = FastAPI(title=settings.APP_NAME)
 
@@ -38,11 +38,12 @@ def ask(req: AskRequest):
     if not q:
         raise HTTPException(status_code=400, detail="Question is required")
 
-    hits = retrieve(q, top_k=req.top_k)
+    hits = retrieve(q, top_k=req.top_k, expand_lists=True)
 
     if not hits:
         return {"question": q, "answer": NO_HITS, "citations": []}
 
+    llm_hits = select_llm_hits(hits)
     citations = [
         {
             "rank": h["rank"],
@@ -52,15 +53,15 @@ def ask(req: AskRequest):
             "chunk_index": h["chunk_index"],
             "score": h["score"],
         }
-        for h in hits
+        for h in llm_hits
     ]
 
     if req.mode == "llm":
         # hard cap to prevent accidental spend (server-side only)
         max_toks = int(getattr(settings, "MAX_ANSWER_TOKENS", 250))
         max_toks = max(32, min(max_toks, 400))  # clamp
-        answer = synthesize_answer(q, hits, max_tokens=max_toks)
+        answer = synthesize_answer(q, llm_hits, max_tokens=max_toks)
     else:
-        answer = format_answer(hits, question=q)
+        answer = format_answer(llm_hits, question=q)
 
     return {"question": q, "answer": answer, "citations": citations}

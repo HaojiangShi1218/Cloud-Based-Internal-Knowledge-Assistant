@@ -145,7 +145,7 @@ def format_answer(hits: List[Dict[str, Any]], question: Optional[str] = None) ->
         return ""
 
     q = (question or "").strip()
-    hits = sorted(hits, key=lambda h: float(h.get("score", 0.0)), reverse=True)
+    hits = sorted(hits, key=lambda h: float(h.get("final_score", h.get("score", 0.0))), reverse=True)
 
     top_score = float(hits[0].get("score", 0.0))
     k = 1 if top_score >= STRONG_SCORE else min(MAX_HITS_WEAK, len(hits))

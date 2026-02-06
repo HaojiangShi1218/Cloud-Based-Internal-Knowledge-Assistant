@@ -19,6 +19,10 @@ from loguru import logger
 from app.config import settings
 import re
 import hashlib
+from collections import defaultdict
+
+CHUNK_SIZE = 2600
+CHUNK_OVERLAP = 600
 
 def file_sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -48,7 +52,7 @@ def clean_pdf_text(t: str) -> str:
     t = re.sub(r"\n{3,}", "\n\n", t)
     return t.strip()
 
-def chunk_text(text: str, chunk_size: int = 3200, overlap: int = 300) -> List[str]:
+def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
     """
     Simple character-based chunking for MVP.
     Later we can upgrade to token-based chunking.
@@ -170,6 +174,7 @@ def main():
     meta: List[Dict[str, Any]] = []
     seen = set()
     next_id = 0
+    doc_seq_counters: Dict[str, int] = defaultdict(int)
 
     # ---- Resume ----
     if index_path.exists() and meta_path.exists():
@@ -183,6 +188,12 @@ def main():
             if not doc_id:
                 continue  # old entries; can't safely dedupe
             seen.add((doc_id, m.get("page_num"), m.get("page_end"), m.get("chunk_index")))
+            seq = m.get("doc_chunk_seq")
+            if isinstance(seq, int):
+                doc_seq_counters[doc_id] = max(doc_seq_counters.get(doc_id, 0), seq + 1)
+            else:
+                # Backfill for older metadata that predates doc_chunk_seq.
+                doc_seq_counters[doc_id] = max(doc_seq_counters.get(doc_id, 0), 1)
 
         logger.info(f"Resumed: index.ntotal={index.ntotal}, meta={len(meta)}, seen={len(seen)}")
 
@@ -246,6 +257,8 @@ def main():
                 continue
 
             seen.add(key)
+            doc_chunk_seq = doc_seq_counters.get(doc_id, 0)
+            doc_seq_counters[doc_id] = doc_chunk_seq + 1
 
             chunk_buf.append(c)
             meta_buf.append({
@@ -255,6 +268,7 @@ def main():
                 "page_num": page_num,
                 "page_end": page_end,
                 "chunk_index": chunk_index,
+                "doc_chunk_seq": doc_chunk_seq,
                 "text": c,
             })
             next_id += 1
