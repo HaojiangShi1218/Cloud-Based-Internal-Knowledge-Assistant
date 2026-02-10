@@ -8,6 +8,12 @@ _CACHE: Dict[str, Tuple[str, float]] = {}
 DEFAULT_TTL_SECONDS = 3600  # 1 hour
 MAX_CACHE_ITEMS = 500
 
+
+def clear_cache() -> int:
+    count = len(_CACHE)
+    _CACHE.clear()
+    return count
+
 def make_cache_key(question: str, hits) -> str:
     base = question.strip().lower()
 

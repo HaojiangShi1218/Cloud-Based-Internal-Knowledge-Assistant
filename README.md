@@ -1,6 +1,6 @@
 # Internal Knowledge Assistant (IKA)
 
-A cloud-based internal AI assistant designed to provide accurate, document-grounded answers to organizational knowledge while ensuring data security and scalability.
+A local-first internal AI assistant designed to provide accurate, document-grounded answers to organizational knowledge while preserving evidence fidelity and enabling future cloud scaling.
 
 This project demonstrates systems thinking, requirements analysis, and cloud-native architecture design aligned with Technical Business Analyst, Solutions Engineer, and future AI Product Manager roles.
 
@@ -14,21 +14,22 @@ Employees often spend excessive time searching across fragmented internal docume
 
 ## Solution Overview
 
-The Internal Knowledge Assistant (IKA) is a cloud-native AI system that:
-- Retrieves relevant internal documents using semantic search
-- Generates grounded responses using retrieval-augmented generation (RAG)
-- Provides citations to ensure transparency and trust
-- Is designed with scalability, security, and reliability in mind
+The Internal Knowledge Assistant (IKA) is a RAG system that:
+- Retrieves relevant document chunks with hybrid semantic + lexical signals
+- Generates grounded responses or evidence-only extracts
+- Provides citations for traceability
+- Is designed for scalability, security, and reliability (cloud-ready)
 
 ---
 
-## Key Features (MVP)
+## Key Features (Current)
 
 - Natural-language question answering
-- Document ingestion and embedding
-- Vector-based semantic retrieval
-- LLM-generated answers with citations
-- Basic logging and monitoring
+- Document ingestion (PDF parsing, sliding-window chunking, metadata)
+- Vector-based semantic retrieval with hybrid reranking
+- LLM-generated answers with citations + evidence-only mode
+- Query rewrite (LLM) for implicit questions
+- Basic logging and cache controls
 
 ---
 
@@ -37,12 +38,14 @@ The Internal Knowledge Assistant (IKA) is a cloud-native AI system that:
 
 ---
 
-## Tech Stack (Initial)
+## Tech Stack (Current)
 
 - Backend: Python, FastAPI
-- Embeddings: OpenAI Embeddings
-- Vector Database: FAISS (local, MVP)
-- LLM: OpenAI API
+- UI: Streamlit
+- Embeddings: sentence-transformers (all-MiniLM-L6-v2, local)
+- Vector DB: FAISS (local)
+- Retrieval: hybrid semantic + BM25 + sentence rerank
+- LLM: OpenAI API (answer synthesis + query rewrite)
 - Storage: Local filesystem (S3 planned)
 - Cloud Target: AWS (future deployment)
 
@@ -62,13 +65,12 @@ This project is designed to demonstrate:
 
 - [x] Requirements definition
 - [x] Architecture design
-- [ ] Backend API implementation
-- [ ] Document ingestion pipeline
-- [ ] Retrieval-augmented QA
+- [x] Backend API implementation
+- [x] Document ingestion pipeline
+- [x] Retrieval-augmented QA
 - [ ] Cloud deployment
 
 ---
 
 ## License
-
 

@@ -14,18 +14,40 @@ with st.sidebar:
     st.header("Settings")
     mode_label = st.radio("Mode", ["Evidence Mode", "Synthesis Mode"], horizontal=True)
     mode = "extract" if mode_label == "Evidence Mode" else "llm"
-    top_k = st.slider("Top K (citations)", min_value=1, max_value=10, value=5, step=1)
-    st.text_input("Backend URL", value=BACKEND_URL, key="backend_url")
-    st.divider()
+    # st.divider()
     st.markdown(
         "- **Evidence Mode**: returns evidence-focused answer\n"
         "- **Synthesis Mode**: synthesizes answer with AI\n"
     )
+    top_k = st.slider("Top K (citations)", min_value=1, max_value=10, value=5, step=1)
+    query_rewrite_enabled = st.checkbox("Query-rewrite", value=True)
+    st.caption(
+        "Query-rewrite generates a few alternative versions of your question to help retrieval. "
+        "It can improve answers to implicit or tricky questions."
+    )
+    st.text_input("Backend URL", value=BACKEND_URL, key="backend_url")
+    if st.button("Clear LLM Cache", use_container_width=True):
+        try:
+            base = st.session_state.get("backend_url", BACKEND_URL).rstrip("/")
+            resp = requests.post(f"{base}/debug/cache/clear", timeout=10)
+            if resp.status_code == 200:
+                cleared = resp.json().get("cleared", 0)
+                st.success(f"Cleared {cleared} cached items.")
+            else:
+                st.error(f"{resp.status_code} {resp.reason}: {resp.text}")
+        except requests.exceptions.RequestException as e:
+            st.error(f"Backend request failed: {e}")
+
+# Apply clear before widget instantiation.
+if st.session_state.get("clear_question"):
+    st.session_state["question_input"] = ""
+    st.session_state["clear_question"] = False
 
 question = st.text_area(
     "Your question",
     placeholder="",
     height=90,
+    key="question_input",
 )
 
 col1, col2 = st.columns([1, 1])
@@ -35,11 +57,16 @@ with col2:
     clear_btn = st.button("Clear", use_container_width=True)
 
 if clear_btn:
-    st.session_state.clear()
+    st.session_state["clear_question"] = True
     st.rerun()
 
-def call_backend(q: str, mode: str, top_k: int):
-    payload = {"question": q, "mode": mode, "top_k": int(top_k)}
+def call_backend(q: str, mode: str, top_k: int, query_rewrite_enabled: bool):
+    payload = {
+        "question": q,
+        "mode": mode,
+        "top-k": int(top_k),
+        "query-rewrite-enabled": bool(query_rewrite_enabled),
+    }
     url = st.session_state.get("backend_url", BACKEND_URL).rstrip("/") + "/ask"
     r = requests.post(url, json=payload, timeout=60)
 
@@ -58,7 +85,7 @@ if ask_btn:
 
     with st.spinner("Searching docs and generating answer..."):
         try:
-            data = call_backend(q, mode=mode, top_k=top_k)
+            data = call_backend(q, mode=mode, top_k=top_k, query_rewrite_enabled=query_rewrite_enabled)
         except requests.exceptions.RequestException as e:
             st.error(f"Backend request failed: {e}")
             st.stop()
@@ -92,4 +119,8 @@ if ask_btn:
                 st.json(c)
 
     st.divider()
-    st.caption("Tip: if citations look off, reduce Top K or tighten chunking/ingestion settings.")
+    st.caption(
+        "Tips: Top‑K controls how many citations are considered. Lower values tighten results "
+        "but can miss key passages. Higher values give the model more to choose from "
+        "(often helpful for implicit questions), but may add noise."
+    )

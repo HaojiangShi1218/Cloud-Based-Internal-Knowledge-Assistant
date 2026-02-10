@@ -3,7 +3,7 @@ import math
 import re
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 import numpy as np
 import faiss
@@ -11,6 +11,7 @@ from loguru import logger
 
 from app.config import settings
 from app.embeddings import embed_texts
+from app.llm import rewrite_queries
 
 # Retrieval tuning
 CANDIDATE_MULT = 12
@@ -393,37 +394,69 @@ def _expand_list_context(meta: List[Dict[str, Any]], query: str, hits: List[Dict
         logger.info(f"List-context expansion added {added} continuation chunks")
     return expanded
 
-def retrieve(query: str, top_k: int = 5, expand_lists: bool = False) -> List[Dict[str, Any]]:
+def retrieve(
+    query: str,
+    top_k: int = 5,
+    expand_lists: bool = False,
+    query_rewrite_enabled: Optional[bool] = None,
+) -> List[Dict[str, Any]]:
     index, meta = load_index_and_meta()
     is_yesno = _is_yesno_question(query)
     stats = _get_corpus_stats(meta, Path(settings.META_PATH))
 
-    q = embed_texts([query]).astype(np.float32)  # (1, 384) normalized already
-    # FAISS expects 2D float32
-    faiss.normalize_L2(q)
+    queries_for_retrieval = [query]
+    if query_rewrite_enabled is None:
+        query_rewrite_enabled = getattr(settings, "QUERY_REWRITE_ENABLED", False)
+    if query_rewrite_enabled:
+        k = int(getattr(settings, "QUERY_REWRITE_K", 3))
+        rewrites = rewrite_queries(query, k=k)
+        if rewrites and len(rewrites) > 1:
+            queries_for_retrieval = rewrites
+            logger.info(f"Query rewrites: {queries_for_retrieval[1:]!r}")
+
+    # Embed each query variant and fuse FAISS candidates by max semantic score.
+    q_embs = embed_texts(queries_for_retrieval).astype(np.float32)
+    if q_embs.ndim == 1:
+        q_embs = q_embs.reshape(1, -1)
+    faiss.normalize_L2(q_embs)
     top_n = max(MIN_CANDIDATES, min(MAX_CANDIDATES, top_k * CANDIDATE_MULT))
-    scores, idxs = index.search(q, top_n)
-    logger.info(f"Top FAISS (semantic) scores: {[round(float(s), 4) for s in scores[0][:10]]}")
+    candidate_map: Dict[int, Dict[str, Any]] = {}
+    for emb in q_embs:
+        scores, idxs = index.search(emb.reshape(1, -1), top_n)
+        for rank, i in enumerate(idxs[0]):
+            if i == -1:
+                continue
+            semantic = float(scores[0][rank])
+            prev = candidate_map.get(int(i))
+            if not prev or semantic > prev["semantic"]:
+                candidate_map[int(i)] = {"semantic": semantic}
+
+    if candidate_map:
+        top_sem = sorted((v["semantic"] for v in candidate_map.values()), reverse=True)
+        logger.info(f"Top FAISS (semantic) scores: {[round(float(s), 4) for s in top_sem[:10]]}")
 
     candidates = []
-    for rank, i in enumerate(idxs[0]):
-        if i == -1:
-            continue
-
-        semantic = float(scores[0][rank])
+    for i, data in candidate_map.items():
         m = meta[int(i)]
+        semantic = float(data["semantic"])
         text = m.get("text", "")
-        lexical = _lexical_score(query, text)
-        bm25 = _bm25_score(query, text, stats)
+        # Blend lexical scores across original + rewrites.
+        lex_scores = [_lexical_score(qv, text) for qv in queries_for_retrieval]
+        lexical = max(lex_scores) if lex_scores else 0.0
+        bm25_scores = [_bm25_score(qv, text, stats) for qv in queries_for_retrieval]
+        bm25 = max(bm25_scores) if bm25_scores else 0.0
         bm25_norm = _bm25_norm(bm25)
-        phrase = _phrase_boost(query, text)
-        focus_cov = _focus_coverage(query, text)
+        phrase_scores = [_phrase_boost(qv, text) for qv in queries_for_retrieval]
+        phrase = max(phrase_scores) if phrase_scores else 0.0
+        focus_cov = _focus_coverage(queries_for_retrieval[0], text)
         yesno_bonus = _yesno_boost(query, text)
-        proximity = _proximity_boost(query, text)
-        between_bonus = _between_boost(query, text)
+        proximity_scores = [_proximity_boost(qv, text) for qv in queries_for_retrieval]
+        proximity = max(proximity_scores) if proximity_scores else 0.0
+        between_scores = [_between_boost(qv, text) for qv in queries_for_retrieval]
+        between_bonus = max(between_scores) if between_scores else 0.0
         final = semantic + (BM25_ALPHA * bm25_norm) + phrase + yesno_bonus + proximity + between_bonus
         candidates.append({
-            "rank": rank + 1,
+            "rank": 0,
             "score": semantic,  # keep key name for response compatibility
             "semantic_score": semantic,
             "lexical_score": lexical,
@@ -445,6 +478,7 @@ def retrieve(query: str, top_k: int = 5, expand_lists: bool = False) -> List[Dic
         })
 
     candidates.sort(key=lambda x: x["final_score"], reverse=True)
+    # Use the original question for sentence rerank to avoid rewrite drift.
     _sentence_rerank(query, candidates)
     candidates.sort(key=lambda x: x["final_score"], reverse=True)
 

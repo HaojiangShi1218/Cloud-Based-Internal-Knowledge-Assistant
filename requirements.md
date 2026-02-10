@@ -24,12 +24,15 @@
 | ID | Requirement | Priority |
 |----|------------|----------|
 | FR-01 | Users can submit natural-language questions | High |
-| FR-02 | System retrieves relevant document content | High |
+| FR-02 | System retrieves relevant document content (top‑k) | High |
 | FR-03 | System generates answers grounded in retrieved documents | High |
 | FR-04 | System displays source citations | High |
 | FR-05 | Admin can upload documents for ingestion | Medium |
 | FR-06 | System logs queries and response latency | Medium |
 | FR-07 | System handles concurrent requests | Medium |
+| FR-08 | Users can choose mode: evidence-only vs synthesis | Medium |
+| FR-09 | Users can toggle query rewrite | Medium |
+| FR-10 | Admin can clear LLM cache (debug) | Low |
 
 ---
 
@@ -51,6 +54,7 @@
 ### Reliability
 - Graceful handling of LLM API failures
 - Logging and monitoring for observability
+ - Deterministic behavior across runs when cache is cleared
 
 ---
 

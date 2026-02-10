@@ -27,6 +27,8 @@ _STOPWORDS = {
     "by", "at", "into", "about", "how", "do", "does", "did", "can", "could", "should", "would",
 }
 
+_REWRITE_CACHE: Dict[str, str] = {}
+
 
 def _clip(text: str, max_chars: int) -> str:
     t = (text or "").strip()
@@ -38,6 +40,76 @@ def _clip(text: str, max_chars: int) -> str:
 def _tokens(s: str) -> List[str]:
     toks = [t.lower() for t in _WORD_RE.findall(s or "")]
     return [t for t in toks if len(t) >= 3 and t not in _STOPWORDS]
+
+def rewrite_queries(question: str, k: int = 3) -> List[str]:
+    """
+    Rewrite an implicit question into explicit search queries.
+    Returns a list starting with the original question, plus up to k rewrites.
+    """
+    q = (question or "").strip()
+    if not q:
+        return [q]
+    if len(_tokens(q)) < int(getattr(settings, "QUERY_REWRITE_MIN_TOKENS", 5)):
+        return [q]
+
+    key = q.lower()
+    cached = _REWRITE_CACHE.get(key)
+    if cached:
+        return [q] + cached
+
+    if not settings.OPENAI_API_KEY:
+        return [q]
+
+    client = OpenAI(api_key=settings.OPENAI_API_KEY)
+    prompt = f"""Rewrite the user question into {k} concise search queries.
+Rules:
+- Preserve all key entities and constraints.
+- Preserve negations (not/never/no) and relational words (between/versus/against).
+- You may use general synonyms or entailments (e.g., trade-offs, impacts, downsides) if they help retrieval.
+- Do not add domain-specific terms that are not present in the question.
+- Do not answer the question.
+- Return JSON only: {{"queries":["...","..."]}}
+
+Question:
+{q}
+"""
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You rewrite questions into search queries. Output JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=140,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        parsed = _extract_json_object(raw)
+        queries: List[str] = []
+        if isinstance(parsed, dict):
+            qs = parsed.get("queries")
+            if isinstance(qs, list):
+                for item in qs:
+                    s = str(item).strip()
+                    if s:
+                        queries.append(s)
+        if queries:
+            # remove duplicates and original
+            deduped = []
+            seen = set()
+            for s in queries:
+                key_s = s.lower()
+                if key_s == key or key_s in seen:
+                    continue
+                seen.add(key_s)
+                deduped.append(s)
+            _REWRITE_CACHE[key] = deduped
+            return [q] + deduped
+    except Exception:
+        return [q]
+
+    return [q]
 
 
 def _is_yesno_question(question: str) -> bool:
@@ -178,6 +250,64 @@ def _validate_payload(payload: Optional[Dict[str, Any]], hits: List[Dict[str, An
     return {"final_answer": final_answer, "claims": normalized_claims}
 
 
+def _strip_citations(text: str) -> str:
+    return _CITE_RE.sub("", text or "").strip()
+
+
+def _cap_citations_by_answer(payload: Dict[str, Any], hits: List[Dict[str, Any]]) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    if not hits:
+        return payload, []
+
+    final_answer = payload.get("final_answer", "")
+    if final_answer == NO_ANSWER:
+        return payload, []
+
+    claims = payload.get("claims", [])
+    key_text = " ".join([final_answer] + [c.get("claim", "") for c in claims if isinstance(c, dict)])
+    key_tokens = list(dict.fromkeys(_tokens(key_text)))
+    if not key_tokens:
+        return payload, hits
+
+    key_set = set(key_tokens)
+    scored: List[tuple[float, int]] = []
+    for idx, h in enumerate(hits):
+        tset = set(_tokens(h.get("text", "")))
+        if not tset:
+            continue
+        overlap = sum(1 for t in key_set if t in tset) / max(1, len(key_set))
+        if overlap > 0:
+            scored.append((overlap, idx))
+
+    if not scored:
+        return {"final_answer": NO_ANSWER, "claims": []}, []
+
+    scored.sort(key=lambda x: (-x[0], hits[x[1]].get("rank", x[1] + 1)))
+    kept_idxs = [idx for _, idx in scored]
+
+    new_hits: List[Dict[str, Any]] = [dict(hits[idx]) for idx in kept_idxs]
+    for i, h in enumerate(new_hits, start=1):
+        h["rank"] = i
+
+    rank_map = {hits[idx].get("rank", idx + 1): i + 1 for i, idx in enumerate(kept_idxs)}
+    new_claims: List[Dict[str, Any]] = []
+    for cl in claims:
+        if not isinstance(cl, dict):
+            continue
+        cite_ids = cl.get("citations", [])
+        if not isinstance(cite_ids, list):
+            continue
+        mapped = [rank_map[c] for c in cite_ids if c in rank_map]
+        mapped = sorted(set(mapped))
+        if mapped:
+            new_claims.append({"claim": cl.get("claim", ""), "citations": mapped})
+
+    if not new_claims:
+        return {"final_answer": NO_ANSWER, "claims": []}, []
+
+    cleaned_answer = _strip_citations(final_answer)
+    return {"final_answer": cleaned_answer, "claims": new_claims}, new_hits
+
+
 def _render_answer(payload: Dict[str, Any]) -> str:
     final_answer = payload["final_answer"].strip()
     if final_answer == NO_ANSWER:
@@ -200,17 +330,27 @@ def _render_answer(payload: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def synthesize_answer(question: str, hits: List[Dict[str, Any]], max_tokens: int = 250) -> str:
+def synthesize_answer(
+    question: str,
+    hits: List[Dict[str, Any]],
+    max_tokens: int = 250,
+) -> tuple[str, List[Dict[str, Any]]]:
     if not hits:
-        return ""
+        return "", []
 
     cache_key = make_cache_key(question, hits)
     cached = get_cached_answer(cache_key)
     if cached:
-        return cached
+        cached_obj = _extract_json_object(cached)
+        valid = _validate_payload(cached_obj, hits, question)
+        if valid:
+            max_hits = MAX_HITS_FOR_LLM
+            capped_payload, capped_hits = _cap_citations_by_answer(valid, hits)
+            answer = _render_answer(capped_payload)
+            return answer, capped_hits
 
     if not settings.OPENAI_API_KEY:
-        return "LLM mode is not configured (missing OPENAI_API_KEY)."
+        return "LLM mode is not configured (missing OPENAI_API_KEY).", []
 
     client = OpenAI(api_key=settings.OPENAI_API_KEY)
     context = build_context(hits)
@@ -265,8 +405,11 @@ Rules:
         parsed = _extract_json_object(raw)
         valid = _validate_payload(parsed, hits, question)
         if valid:
-            answer = _render_answer(valid)
-            break
+            max_hits = MAX_HITS_FOR_LLM
+            capped_payload, capped_hits = _cap_citations_by_answer(valid, hits)
+            answer = _render_answer(capped_payload)
+            set_cached_answer(cache_key, json.dumps(valid))
+            return answer, capped_hits
 
-    set_cached_answer(cache_key, answer)
-    return answer
+    set_cached_answer(cache_key, json.dumps({"final_answer": NO_ANSWER, "claims": []}))
+    return answer, []

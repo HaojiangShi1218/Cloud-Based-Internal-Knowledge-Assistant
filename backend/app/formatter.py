@@ -142,7 +142,7 @@ def _extract_section_for_term(text: str, term: str) -> str:
 
 def format_answer(hits: List[Dict[str, Any]], question: Optional[str] = None) -> str:
     if not hits:
-        return ""
+        return "No evidence found"
 
     q = (question or "").strip()
     hits = sorted(hits, key=lambda h: float(h.get("final_score", h.get("score", 0.0))), reverse=True)
@@ -152,18 +152,12 @@ def format_answer(hits: List[Dict[str, Any]], question: Optional[str] = None) ->
 
     qtype = _infer_question_type(q)
 
-    # --- choose answer_hit (the hit we actually used to create the Answer line) ---
+    # --- choose answer_hit (used only to seed evidence ordering) ---
     if qtype == "definition":
         term = _extract_term(q)
         answer_hit = _choose_best_hit_for_term(hits, term) if term else hits[0]
-        answer_line = _extract_section_for_term(answer_hit.get("text", ""), term) if term else _first_sentences(answer_hit.get("text", ""), 2)
     else:
         answer_hit = hits[0]
-        answer_line = _first_sentences(answer_hit.get("text", ""), 10)
-
-    answer_line = _clean(answer_line)
-    if len(answer_line) > MAX_ANSWER_CHARS:
-        answer_line = answer_line[:MAX_ANSWER_CHARS].rstrip() + "..."
 
     # --- Evidence: always include answer_hit first, then fill with other top hits ---
     evidence_hits = [answer_hit]
@@ -190,6 +184,6 @@ def format_answer(hits: List[Dict[str, Any]], question: Optional[str] = None) ->
             snippet = _first_sentences(h.get("text", ""), 10)
         evidence_lines.append(f"- ({_label(h)}) {snippet}")
 
-    out = "Answer: " + (answer_line if answer_line else "No exact answers found. See evidence below.")
+    out = "Answer: See relevant evidence below."
     out += "\n\nEvidence:\n" + "\n".join(evidence_lines)
     return out
