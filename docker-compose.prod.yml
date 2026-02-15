@@ -1,0 +1,29 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - .env.prod
+    restart: unless-stopped
+
+  ui:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      - API_BASE_URL=/api
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - ui
+      - api
+    restart: unless-stopped

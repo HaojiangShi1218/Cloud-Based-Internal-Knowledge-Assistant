@@ -9,7 +9,10 @@ from app.formatter import format_answer
 from app.cache import clear_cache
 from app.llm import select_llm_hits, synthesize_answer
 
-app = FastAPI(title=settings.APP_NAME)
+app = FastAPI(
+    title=settings.APP_NAME,
+    root_path="/api",
+)
 
 NO_HITS = (
     "I couldn’t find anything relevant in the current knowledge base. "
