@@ -1,0 +1,251 @@
+diff --git a/backend/Dockerfile b/backend/Dockerfile
+new file mode 100644
+index 0000000..3602567
+--- /dev/null
++++ b/backend/Dockerfile
+@@ -0,0 +1,18 @@
++FROM python:3.11-slim
++
++WORKDIR /app
++
++RUN apt-get update && apt-get install -y --no-install-recommends \
++    build-essential \
++ && rm -rf /var/lib/apt/lists/*
++
++COPY backend/requirements.txt /app/requirements.txt
++RUN pip install --no-cache-dir -r /app/requirements.txt
++
++COPY backend /app
++
++ENV PYTHONUNBUFFERED=1
++ENV PYTHONPATH=/app
++
++CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
++
+diff --git a/backend/app/config.py b/backend/app/config.py
+index 8e6f999..4c2a57e 100644
+--- a/backend/app/config.py
++++ b/backend/app/config.py
+@@ -17,4 +17,10 @@ class Settings:
+     FAISS_INDEX_PATH: str = os.getenv("FAISS_INDEX_PATH", "data/faiss.index")
+     META_PATH: str = os.getenv("META_PATH", "data/meta.json")
+     MAX_ANSWER_TOKENS: int = int(os.getenv("MAX_ANSWER_TOKENS", "250"))
++    
++    VECTOR_STORE: str = os.getenv("VECTOR_STORE", "faiss")
++    OPENSEARCH_HOST: str = os.getenv("OPENSEARCH_HOST", "")
++    OPENSEARCH_INDEX: str = os.getenv("OPENSEARCH_INDEX", "ika_chunks_v1")
++    AWS_REGION: str = os.getenv("AWS_REGION", "us-east-1")
++
+ settings = Settings()
+diff --git a/backend/app/main.py b/backend/app/main.py
+index 0ed7ac7..a941d54 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -9,7 +9,10 @@ from app.formatter import format_answer
+ from app.cache import clear_cache
+ from app.llm import select_llm_hits, synthesize_answer
+ 
+-app = FastAPI(title=settings.APP_NAME)
++app = FastAPI(
++    title=settings.APP_NAME,
++    root_path="/api",
++)
+ 
+ NO_HITS = (
+     "I couldn’t find anything relevant in the current knowledge base. "
+diff --git a/backend/app/vectorstores/opensearch_store.py b/backend/app/vectorstores/opensearch_store.py
+new file mode 100644
+index 0000000..f8e78e1
+--- /dev/null
++++ b/backend/app/vectorstores/opensearch_store.py
+@@ -0,0 +1,92 @@
++import os
++import boto3
++from typing import Any, Dict, List, Optional
++
++from opensearchpy import OpenSearch, RequestsHttpConnection
++from requests_aws4auth import AWS4Auth
++
++
++def _client() -> OpenSearch:
++    host = os.getenv("OPENSEARCH_HOST", "")
++    if not host:
++        raise RuntimeError("OPENSEARCH_HOST is not set")
++
++    region = os.getenv("AWS_REGION", "us-east-1")
++    service = "es"
++
++    session = boto3.Session()
++    creds = session.get_credentials()
++    if creds is None:
++        raise RuntimeError("No AWS credentials available (EC2 role / IMDS)")
++
++    awsauth = AWS4Auth(
++        creds.access_key,
++        creds.secret_key,
++        region,
++        service,
++        session_token=creds.token,
++    )
++
++    return OpenSearch(
++        hosts=[{"host": host, "port": 443}],
++        http_auth=awsauth,
++        use_ssl=True,
++        verify_certs=True,
++        connection_class=RequestsHttpConnection,
++        timeout=60,
++        max_retries=3,
++        retry_on_timeout=True,
++    )
++
++
++def bulk_index_chunks(index: str, docs: List[Dict[str, Any]]) -> None:
++    """
++    docs items must include:
++      - doc_id (str)
++      - chunk_id (int)
++      - text (str)
++      - embedding (List[float], len=384)
++    plus any metadata fields you want (page, source, title, ...)
++    """
++    client = _client()
++
++    # Bulk format: action line + source line
++    body: List[Dict[str, Any]] = []
++    for d in docs:
++        doc_id = d.get("doc_id", "doc")
++        chunk_id = int(d.get("chunk_id", 0))
++        _id = f"{doc_id}:{chunk_id}"
++
++        body.append({"index": {"_index": index, "_id": _id}})
++        body.append(d)
++
++    resp = client.bulk(body=body, refresh=True)
++    if resp.get("errors"):
++        # surface first few failures to make debugging obvious
++        items = resp.get("items", [])[:5]
++        raise RuntimeError(f"OpenSearch bulk errors. Sample items: {items}")
++
++
++def knn_search(index: str, query_vec: List[float], k: int) -> List[Dict[str, Any]]:
++    client = _client()
++    q = {
++        "size": k,
++        "_source": ["doc_id", "chunk_id", "text", "page", "source", "title"],
++        "query": {
++            "knn": {
++                "embedding": {
++                    "vector": query_vec,
++                    "k": k
++                }
++            }
++        }
++    }
++
++    resp = client.search(index=index, body=q)
++    hits = resp.get("hits", {}).get("hits", [])
++    out = []
++    for h in hits:
++        s = h.get("_source", {})
++        s["_score"] = h.get("_score")
++        out.append(s)
++    return out
+diff --git a/backend/requirements.txt b/backend/requirements.txt
+index a0ef337..64cc00a 100644
+--- a/backend/requirements.txt
++++ b/backend/requirements.txt
+@@ -28,3 +28,7 @@ torch==2.2.2
+ 
+ # SSL compatibility on macOS LibreSSL builds
+ urllib3==1.26.18
++
++opensearch-py==2.6.0
++requests-aws4auth==1.2.3
++boto3==1.34.0
+diff --git a/deploy/nginx.conf b/deploy/nginx.conf
+new file mode 100644
+index 0000000..c3df591
+--- /dev/null
++++ b/deploy/nginx.conf
+@@ -0,0 +1,28 @@
++events {}
++
++http {
++  server {
++    listen 80;
++
++    location / {
++      proxy_pass http://ui:8501/;
++      proxy_http_version 1.1;
++
++      proxy_set_header Host $host;
++      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
++      proxy_set_header X-Forwarded-Proto $scheme;
++
++      proxy_set_header Upgrade $http_upgrade;
++      proxy_set_header Connection "upgrade";
++      proxy_read_timeout 86400;
++    }
++
++    location /api/ {
++      proxy_pass http://api:8000/;
++
++      proxy_set_header Host $host;
++      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
++      proxy_set_header X-Forwarded-Proto $scheme;
++    }
++  }
++}
+diff --git a/docker-compose.prod.yml b/docker-compose.prod.yml
+new file mode 100644
+index 0000000..633cf96
+--- /dev/null
++++ b/docker-compose.prod.yml
+@@ -0,0 +1,29 @@
++services:
++  api:
++    build:
++      context: .
++      dockerfile: backend/Dockerfile
++    env_file:
++      - .env.prod
++    restart: unless-stopped
++
++  ui:
++    build:
++      context: .
++      dockerfile: frontend/Dockerfile
++    environment:
++      - API_BASE_URL=/api
++    depends_on:
++      - api
++    restart: unless-stopped
++
++  nginx:
++    image: nginx:alpine
++    ports:
++      - "80:80"
++    volumes:
++      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
++    depends_on:
++      - ui
++      - api
++    restart: unless-stopped
+diff --git a/frontend/Dockerfile b/frontend/Dockerfile
+new file mode 100644
+index 0000000..4a6f9b0
+--- /dev/null
++++ b/frontend/Dockerfile
+@@ -0,0 +1,11 @@
++FROM python:3.11-slim
++
++WORKDIR /app
++
++COPY frontend/requirements.txt /app/requirements.txt
++RUN pip install --no-cache-dir -r /app/requirements.txt
++
++COPY frontend /app
++
++EXPOSE 8501
++CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
