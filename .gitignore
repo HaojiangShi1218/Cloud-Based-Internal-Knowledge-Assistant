@@ -68,3 +68,7 @@ frontend/.streamlit/
 # ========================
 *.pdf
 
+
+# local transfer artifacts
+ec2_changes.patch
+*.tgz
