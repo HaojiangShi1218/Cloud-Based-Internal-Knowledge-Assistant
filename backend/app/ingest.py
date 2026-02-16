@@ -5,18 +5,17 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 from app.embeddings import embed_texts
 
-import numpy as np
-import faiss
-faiss.omp_set_num_threads(1)
 from pypdf import PdfReader
 from loguru import logger
+from opensearchpy import helpers
 # from openai import OpenAI
 from app.config import settings
+from app.vectorstores.opensearch_store import get_os_client
 import re
 import hashlib
 from collections import defaultdict
@@ -165,122 +164,77 @@ def main():
         logger.error("No documents found. Put PDFs/txt/md into docs/ and retry.")
         return
 
-    Path(settings.DATA_DIR).mkdir(parents=True, exist_ok=True)
-
-    index_path = Path(settings.FAISS_INDEX_PATH)
-    meta_path = Path(settings.META_PATH)
-
-    index = None
-    meta: List[Dict[str, Any]] = []
-    seen = set()
-    next_id = 0
-    doc_seq_counters: Dict[str, int] = defaultdict(int)
-
-    # ---- Resume ----
-    if index_path.exists() and meta_path.exists():
-        logger.info("Found existing index/meta — resuming (dedupe enabled).")
-        index = faiss.read_index(str(index_path))
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-
-        next_id = len(meta)
-        for m in meta:
-            doc_id = m.get("doc_id")
-            if not doc_id:
-                continue  # old entries; can't safely dedupe
-            seen.add((doc_id, m.get("page_num"), m.get("page_end"), m.get("chunk_index")))
-            seq = m.get("doc_chunk_seq")
-            if isinstance(seq, int):
-                doc_seq_counters[doc_id] = max(doc_seq_counters.get(doc_id, 0), seq + 1)
-            else:
-                # Backfill for older metadata that predates doc_chunk_seq.
-                doc_seq_counters[doc_id] = max(doc_seq_counters.get(doc_id, 0), 1)
-
-        logger.info(f"Resumed: index.ntotal={index.ntotal}, meta={len(meta)}, seen={len(seen)}")
-
-        if index.ntotal != len(meta):
-            logger.warning(
-                f"Mismatch: index.ntotal={index.ntotal} meta={len(meta)}. "
-                "Likely a prior crash mid-write. Consider rebuilding once if issues appear."
-            )
-
-    # ---- Incremental batching ----
     BATCH_SIZE = 128
-    SAVE_EVERY_CHUNKS = 2000
-
+    client = get_os_client()
+    index_name = settings.OPENSEARCH_INDEX
     chunk_buf: List[str] = []
-    meta_buf: List[Dict[str, Any]] = []
-
-    def checkpoint():
-        if index is None:
-            return
-        faiss.write_index(index, settings.FAISS_INDEX_PATH)
-        with open(settings.META_PATH, "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
-        logger.info(f"Checkpoint saved: chunks={len(meta)}")
+    docs_buf: List[Dict[str, Any]] = []
+    total = 0
 
     def flush():
-        nonlocal index, meta, chunk_buf, meta_buf
+        nonlocal total
         if not chunk_buf:
             return
+        emb = embed_texts(chunk_buf).tolist()
+        now = datetime.now(timezone.utc).isoformat()
+        actions = []
+        for d, vec in zip(docs_buf, emb):
+            doc_id = d["doc_id"]
+            page = d["page"]
+            chunk_id = d["chunk_id"]
+            op_id = f"{doc_id}:{page}:{chunk_id}"
+            source_doc = {
+                "chunk_id": chunk_id,
+                "doc_id": doc_id,
+                "page": page,
+                "source": d["source"],
+                "title": d["title"],
+                "text": d["text"],
+                "embedding": vec,
+                "created_at": now,
+            }
+            actions.append(
+                {
+                    "_op_type": "index",
+                    "_index": index_name,
+                    "_id": op_id,
+                    "_source": source_doc,
+                }
+            )
 
-        emb = embed_texts(chunk_buf)
-        emb = np.ascontiguousarray(emb, dtype=np.float32)
-        faiss.normalize_L2(emb)
-        dim = emb.shape[1]
-
-        if index is None:
-            logger.info(f"Creating FAISS index (dim={dim})")
-            index = faiss.IndexFlatIP(dim)
-
-        index.add(emb)
-        meta.extend(meta_buf)
-
+        helpers.bulk(client, actions, request_timeout=120, refresh=False)
+        total += len(actions)
+        logger.info(f"Indexed {total} chunks to OpenSearch")
         chunk_buf.clear()
-        meta_buf.clear()
+        docs_buf.clear()
 
-        if len(meta) % SAVE_EVERY_CHUNKS < BATCH_SIZE:
-            checkpoint()
-
-    added = 0
-    skipped = 0
+    doc_seq_counters: Dict[str, int] = defaultdict(int)
 
     for (source, text, extra) in docs:
         doc_id = extra.get("doc_id")
         page_num = extra.get("page_num")
-        page_end = extra.get("page_end", page_num)
-
         chunks = chunk_text(text)
         for chunk_index, c in enumerate(chunks):
-            key = (doc_id, page_num, page_end, chunk_index)
-            if key in seen:
-                skipped += 1
-                continue
-
-            seen.add(key)
-            doc_chunk_seq = doc_seq_counters.get(doc_id, 0)
-            doc_seq_counters[doc_id] = doc_chunk_seq + 1
-
             chunk_buf.append(c)
-            meta_buf.append({
-                "id": next_id,
-                "doc_id": doc_id,
-                "source": source,
-                "page_num": page_num,
-                "page_end": page_end,
-                "chunk_index": chunk_index,
-                "doc_chunk_seq": doc_chunk_seq,
-                "text": c,
-            })
-            next_id += 1
-            added += 1
+            docs_buf.append(
+                {
+                    "doc_id": doc_id,
+                    "source": source,
+                    "title": source,
+                    "page": page_num if page_num is not None else 0,
+                    "chunk_id": chunk_index,
+                    "doc_chunk_seq": doc_seq_counters.get(doc_id, 0),
+                    "text": c,
+                }
+            )
+            doc_seq_counters[doc_id] = doc_seq_counters.get(doc_id, 0) + 1
 
             if len(chunk_buf) >= BATCH_SIZE:
                 flush()
 
     flush()
-    checkpoint()
-
-    logger.success(f"Done. Added={added} Skipped={skipped} Total={len(meta)}")
+    client.indices.refresh(index=index_name)
+    logger.success(f"Done. Indexed total={total} into {index_name}")
 
 if __name__ == "__main__":
     main()

@@ -1,17 +1,15 @@
-import json
 import math
 import re
 from collections import Counter
-from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 
 import numpy as np
-import faiss
 from loguru import logger
 
 from app.config import settings
 from app.embeddings import embed_texts
 from app.llm import rewrite_queries
+from app.vectorstores.opensearch_store import knn_search
 
 # Retrieval tuning
 CANDIDATE_MULT = 12
@@ -58,22 +56,6 @@ _LIST_LEAD_RE = re.compile(
 _BETWEEN_RE = re.compile(r"\bbetween\b[^.]{0,120}\band\b[^.]{0,120}", re.IGNORECASE)
 _SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
-_CORPUS_CACHE: Dict[str, Any] = {"mtime": None, "len": None, "stats": None}
-
-def load_index_and_meta() -> Tuple[faiss.Index, List[Dict[str, Any]]]:
-    index_path = Path(settings.FAISS_INDEX_PATH)
-    meta_path = Path(settings.META_PATH)
-
-    if not index_path.exists() or not meta_path.exists():
-        raise FileNotFoundError("Vector store not found. Run: python -m app.ingest")
-
-    index = faiss.read_index(str(index_path))
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    if index.ntotal != len(meta):
-        raise RuntimeError(f"Index/meta mismatch: index.ntotal={index.ntotal}, len(meta)={len(meta)}")
-
-    return index, meta
-
 def _tokens(s: str) -> List[str]:
     toks = [t.lower() for t in _WORD_RE.findall(s or "")]
     return [t for t in toks if len(t) >= 3 and t not in _STOPWORDS]
@@ -102,20 +84,12 @@ def _compute_corpus_stats(meta: List[Dict[str, Any]]) -> Dict[str, Any]:
     idf = {t: math.log((n_docs - c + 0.5) / (c + 0.5) + 1.0) for t, c in df.items()}
     return {"idf": idf, "avgdl": avgdl, "n_docs": n_docs}
 
-def _get_corpus_stats(meta: List[Dict[str, Any]], meta_path: Path) -> Dict[str, Any]:
-    try:
-        mtime = meta_path.stat().st_mtime
-    except FileNotFoundError:
-        mtime = None
-    cache = _CORPUS_CACHE
-    if cache["stats"] and cache["mtime"] == mtime and cache["len"] == len(meta):
-        return cache["stats"]
-    stats = _compute_corpus_stats(meta)
-    cache["mtime"] = mtime
-    cache["len"] = len(meta)
-    cache["stats"] = stats
-    logger.info(f"Corpus stats: docs={stats['n_docs']} avgdl={round(stats['avgdl'], 1)} tokens={len(stats['idf'])}")
-    return stats
+def _l2_normalize(arr: np.ndarray) -> np.ndarray:
+    if arr.size == 0:
+        return arr
+    norms = np.linalg.norm(arr, axis=1, keepdims=True)
+    norms = np.where(norms == 0, 1.0, norms)
+    return arr / norms
 
 def _bm25_score(query: str, text: str, stats: Dict[str, Any]) -> float:
     qtok = _tokens(query)
@@ -263,8 +237,7 @@ def _sentence_rerank(query: str, candidates: List[Dict[str, Any]]) -> None:
         return
 
     top = candidates[:SENT_RERANK_TOP]
-    q = embed_texts([query]).astype(np.float32)
-    faiss.normalize_L2(q)
+    q = _l2_normalize(embed_texts([query]).astype(np.float32))
 
     for c in top:
         sents = _split_sentences(c.get("text", ""))
@@ -273,8 +246,7 @@ def _sentence_rerank(query: str, candidates: List[Dict[str, Any]]) -> None:
             continue
         if len(sents) > SENT_MAX_PER_CHUNK:
             sents = sents[:SENT_MAX_PER_CHUNK]
-        X = embed_texts(sents).astype(np.float32)
-        faiss.normalize_L2(X)
+        X = _l2_normalize(embed_texts(sents).astype(np.float32))
         sims = (X @ q[0]).astype(np.float32)
         best = float(np.max(sims)) if sims.size else 0.0
         c["sentence_score"] = best
@@ -400,9 +372,7 @@ def retrieve(
     expand_lists: bool = False,
     query_rewrite_enabled: Optional[bool] = None,
 ) -> List[Dict[str, Any]]:
-    index, meta = load_index_and_meta()
     is_yesno = _is_yesno_question(query)
-    stats = _get_corpus_stats(meta, Path(settings.META_PATH))
 
     queries_for_retrieval = [query]
     if query_rewrite_enabled is None:
@@ -414,30 +384,39 @@ def retrieve(
             queries_for_retrieval = rewrites
             logger.info(f"Query rewrites: {queries_for_retrieval[1:]!r}")
 
-    # Embed each query variant and fuse FAISS candidates by max semantic score.
+    # Embed each query variant and fuse OpenSearch candidates by max semantic score.
     q_embs = embed_texts(queries_for_retrieval).astype(np.float32)
     if q_embs.ndim == 1:
         q_embs = q_embs.reshape(1, -1)
-    faiss.normalize_L2(q_embs)
     top_n = max(MIN_CANDIDATES, min(MAX_CANDIDATES, top_k * CANDIDATE_MULT))
-    candidate_map: Dict[int, Dict[str, Any]] = {}
+    candidate_map: Dict[Tuple[str, int, Any], Dict[str, Any]] = {}
     for emb in q_embs:
-        scores, idxs = index.search(emb.reshape(1, -1), top_n)
-        for rank, i in enumerate(idxs[0]):
-            if i == -1:
-                continue
-            semantic = float(scores[0][rank])
-            prev = candidate_map.get(int(i))
+        hits = knn_search(emb.tolist(), k=max(top_n * 2, 20))
+        for h in hits:
+            key = (
+                str(h.get("doc_id", "")),
+                int(h.get("chunk_id", -1) or -1),
+                h.get("page"),
+            )
+            semantic = float(h.get("score", 0.0))
+            prev = candidate_map.get(key)
             if not prev or semantic > prev["semantic"]:
-                candidate_map[int(i)] = {"semantic": semantic}
+                candidate_map[key] = {"semantic": semantic, "hit": h}
 
     if candidate_map:
         top_sem = sorted((v["semantic"] for v in candidate_map.values()), reverse=True)
-        logger.info(f"Top FAISS (semantic) scores: {[round(float(s), 4) for s in top_sem[:10]]}")
+        logger.info(f"Top OpenSearch (semantic) scores: {[round(float(s), 4) for s in top_sem[:10]]}")
+
+    os_meta = []
+    for v in candidate_map.values():
+        hit = v["hit"]
+        os_meta.append({"text": hit.get("text", "")})
+    stats = _compute_corpus_stats(os_meta)
+    logger.info(f"Corpus stats: docs={stats['n_docs']} avgdl={round(stats['avgdl'], 1)} tokens={len(stats['idf'])}")
 
     candidates = []
-    for i, data in candidate_map.items():
-        m = meta[int(i)]
+    for data in candidate_map.values():
+        m = data["hit"]
         semantic = float(data["semantic"])
         text = m.get("text", "")
         # Blend lexical scores across original + rewrites.
@@ -468,12 +447,12 @@ def retrieve(
             "proximity_bonus": proximity,
             "between_bonus": between_bonus,
             "final_score": final,
-            "source": m["source"],
-            "page_num": m.get("page_num"),
-            "page_end": m.get("page_end", m["page_num"]),
-            "chunk_index": m["chunk_index"],
+            "source": m.get("source", ""),
+            "page_num": m.get("page"),
+            "page_end": m.get("page"),
+            "chunk_index": m.get("chunk_id"),
             "doc_id": m.get("doc_id"),
-            "doc_chunk_seq": m.get("doc_chunk_seq"),
+            "doc_chunk_seq": None,
             "text": text,
         })
 
@@ -500,6 +479,4 @@ def retrieve(
         r["rank"] = i
 
     logger.info(f"Top hybrid final scores: {[round(r['final_score'], 4) for r in out]}")
-    if expand_lists:
-        return _expand_list_context(meta, query, out)
     return out
