@@ -1,7 +1,10 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field, root_validator
 from loguru import logger
 from typing import Literal, Optional
+import json
+import time
+from hashlib import sha256
 
 from app.config import settings
 from app.rag import retrieve
@@ -59,47 +62,72 @@ class AskRequest(BaseModel):
         allow_population_by_field_name = True
 
 @app.post("/ask")
-def ask(req: AskRequest):
+def ask(req: AskRequest, request: Request):
+    t0 = time.perf_counter()
+    ok = False
+    hit_count = 0
+
     q = (req.question or "").strip()
     if not q:
         raise HTTPException(status_code=400, detail="Question is required")
 
-    hits = retrieve(
-        q,
-        top_k=req.top_k,
-        expand_lists=True,
-        query_rewrite_enabled=req.query_rewrite_enabled,
-    )
-
-    if not hits:
-        return {"question": q, "answer": NO_HITS, "citations": []}
-
-    if req.mode == "llm":
-        # hard cap to prevent accidental spend (server-side only)
-        max_toks = int(getattr(settings, "MAX_ANSWER_TOKENS", 250))
-        max_toks = max(32, min(max_toks, 400))  # clamp
-        llm_hits = select_llm_hits(hits, max_hits=req.top_k)
-        answer, used_hits = synthesize_answer(
+    try:
+        hits = retrieve(
             q,
-            llm_hits,
-            max_tokens=max_toks,
+            top_k=req.top_k,
+            expand_lists=True,
+            query_rewrite_enabled=req.query_rewrite_enabled,
         )
-        citations_src = used_hits
-    else:
-        llm_hits = select_llm_hits(hits, max_hits=req.top_k)
-        answer = format_answer(llm_hits, question=q)
-        citations_src = llm_hits
+        hit_count = len(hits or [])
 
-    citations = [
-        {
-            "rank": h["rank"],
-            "source": h["source"],
-            "page_num": h.get("page_num"),
-            "page_end": h.get("page_end"),
-            "chunk_index": h["chunk_index"],
-            "score": h["score"],
+        if not hits:
+            ok = True
+            return {"question": q, "answer": NO_HITS, "citations": []}
+
+        if req.mode == "llm":
+            # hard cap to prevent accidental spend (server-side only)
+            max_toks = int(getattr(settings, "MAX_ANSWER_TOKENS", 250))
+            max_toks = max(32, min(max_toks, 400))  # clamp
+            llm_hits = select_llm_hits(hits, max_hits=req.top_k)
+            answer, used_hits = synthesize_answer(
+                q,
+                llm_hits,
+                max_tokens=max_toks,
+            )
+            citations_src = used_hits
+        else:
+            llm_hits = select_llm_hits(hits, max_hits=req.top_k)
+            answer = format_answer(llm_hits, question=q)
+            citations_src = llm_hits
+
+        citations = [
+            {
+                "rank": h["rank"],
+                "source": h["source"],
+                "page_num": h.get("page_num"),
+                "page_end": h.get("page_end"),
+                "chunk_index": h["chunk_index"],
+                "score": h["score"],
+            }
+            for h in (citations_src or [])
+        ]
+
+        ok = True
+        return {"question": q, "answer": answer, "citations": citations}
+    finally:
+        latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+        log_obj = {
+            "event": "ask_request",
+            "ok": ok,
+            "latency_ms": latency_ms,
+            "mode": req.mode,
+            "top_k": req.top_k,
+            "query_rewrite_enabled": req.query_rewrite_enabled,
+            "hit_count": hit_count,
+            "client_ip": request.client.host if request.client else None,
+            # privacy-safe question logging
+            "question_len": len(q),
+            "question_sha256": sha256(q.encode("utf-8")).hexdigest(),
+            "question_preview": q[:80],
         }
-        for h in (citations_src or [])
-    ]
-
-    return {"question": q, "answer": answer, "citations": citations}
+        logger.info(json.dumps(log_obj, ensure_ascii=False))
