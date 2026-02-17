@@ -3,7 +3,8 @@ import requests
 import streamlit as st
 
 # --- Config ---
-BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+# BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+API_URL = os.getenv("API_URL", "http://api:8000")
 
 st.set_page_config(page_title="Knowledge Assistant", page_icon="🔎", layout="centered")
 
@@ -25,10 +26,10 @@ with st.sidebar:
         "Query-rewrite generates a few alternative versions of your question to help retrieval. "
         "It can improve answers to implicit or tricky questions."
     )
-    st.text_input("Backend URL", value=BACKEND_URL, key="backend_url")
+    st.text_input("Backend URL", value=API_URL, key="api_url")
     if st.button("Clear LLM Cache", use_container_width=True):
         try:
-            base = st.session_state.get("backend_url", BACKEND_URL).rstrip("/")
+            base = st.session_state.get("api_url", API_URL).rstrip("/")
             resp = requests.post(f"{base}/debug/cache/clear", timeout=10)
             if resp.status_code == 200:
                 cleared = resp.json().get("cleared", 0)
@@ -67,7 +68,7 @@ def call_backend(q: str, mode: str, top_k: int, query_rewrite_enabled: bool):
         "top-k": int(top_k),
         "query-rewrite-enabled": bool(query_rewrite_enabled),
     }
-    url = st.session_state.get("backend_url", BACKEND_URL).rstrip("/") + "/ask"
+    url = st.session_state.get("api_url", API_URL).rstrip("/") + "/ask"
     r = requests.post(url, json=payload, timeout=60)
 
     if r.status_code != 200:

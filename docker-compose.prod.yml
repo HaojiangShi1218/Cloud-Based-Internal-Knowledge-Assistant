@@ -12,7 +12,7 @@ services:
       context: .
       dockerfile: frontend/Dockerfile
     environment:
-      - API_BASE_URL=/api
+      - .env.prod
     depends_on:
       - api
     restart: unless-stopped
