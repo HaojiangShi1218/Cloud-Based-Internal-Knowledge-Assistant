@@ -232,23 +232,37 @@ def _sentence_rerank(query: str, candidates: List[Dict[str, Any]]) -> None:
     """
     Sentence-level rerank to handle implicit questions by matching the best sentence
     inside each chunk against the query embedding.
+    Embeds all candidate sentences in one batch to reduce per-call overhead.
     """
     if not candidates:
         return
 
     top = candidates[:SENT_RERANK_TOP]
     q = _l2_normalize(embed_texts([query]).astype(np.float32))
+    all_sents: List[str] = []
+    spans: List[Tuple[int, int]] = []
 
     for c in top:
         sents = _split_sentences(c.get("text", ""))
         sents = [s for s in sents if len(s) >= SENT_MIN_CHARS]
-        if not sents:
-            continue
         if len(sents) > SENT_MAX_PER_CHUNK:
             sents = sents[:SENT_MAX_PER_CHUNK]
-        X = _l2_normalize(embed_texts(sents).astype(np.float32))
-        sims = (X @ q[0]).astype(np.float32)
-        best = float(np.max(sims)) if sims.size else 0.0
+
+        start = len(all_sents)
+        all_sents.extend(sents)
+        end = len(all_sents)
+        spans.append((start, end))
+
+    if not all_sents:
+        return
+
+    X = _l2_normalize(embed_texts(all_sents).astype(np.float32))
+    sims = (X @ q[0]).astype(np.float32)
+
+    for c, (a, b) in zip(top, spans):
+        if a == b:
+            continue
+        best = float(np.max(sims[a:b]))
         c["sentence_score"] = best
         c["final_score"] = float(c.get("final_score", 0.0)) + (SENT_BONUS_WEIGHT * best)
 
