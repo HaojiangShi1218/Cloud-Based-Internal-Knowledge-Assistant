@@ -15,8 +15,6 @@ from app.llm import select_llm_hits, synthesize_answer
 from app.utils.timing import span
 import logging
 
-logger = logging.getLogger(__name__)
-
 app = FastAPI(
     title=settings.APP_NAME,
     root_path="/api",
@@ -147,4 +145,4 @@ def ask(req: AskRequest, request: Request):
             "question_preview": q[:80],
             "spans_ms": spans,          # <-- the money line
         }
-        logger.info(json.dumps(log_obj, ensure_ascii=False))
+        logger.info("ASK_SPANS {}", log_obj)
