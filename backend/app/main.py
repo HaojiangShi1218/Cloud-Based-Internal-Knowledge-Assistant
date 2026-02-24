@@ -81,8 +81,6 @@ def ask(req: AskRequest, request: Request):
 
     try:
         query_rewrite_enabled = req.query_rewrite_enabled
-        if query_rewrite_enabled is None and req.mode == "extract":
-            query_rewrite_enabled = False
 
         with span("retrieve", spans):
             hits = retrieve(
