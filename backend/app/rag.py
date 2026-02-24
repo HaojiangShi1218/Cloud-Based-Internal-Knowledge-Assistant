@@ -471,9 +471,6 @@ def retrieve(
         })
 
     candidates.sort(key=lambda x: x["final_score"], reverse=True)
-    # Use the original question for sentence rerank to avoid rewrite drift.
-    _sentence_rerank(query, candidates)
-    candidates.sort(key=lambda x: x["final_score"], reverse=True)
 
     if is_yesno:
         high_cov = [c for c in candidates if c.get("focus_coverage", 0.0) >= YESNO_COVERAGE_GATE]
