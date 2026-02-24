@@ -10,6 +10,7 @@ from app.config import settings
 from app.rag import retrieve
 from app.formatter import format_answer
 from app.cache import clear_cache
+from app.embeddings import get_model
 from app.llm import select_llm_hits, synthesize_answer
 from app.utils.timing import span
 import logging
@@ -28,6 +29,8 @@ NO_HITS = (
 
 @app.on_event("startup")
 def on_startup():
+    # Warm local embedding model at startup to avoid first-request latency spikes.
+    get_model()
     logger.info("Application startup complete")
 
 @app.get("/health")
@@ -77,12 +80,16 @@ def ask(req: AskRequest, request: Request):
         raise HTTPException(status_code=400, detail="Question is required")
 
     try:
+        query_rewrite_enabled = req.query_rewrite_enabled
+        if query_rewrite_enabled is None and req.mode == "extract":
+            query_rewrite_enabled = False
+
         with span("retrieve", spans):
             hits = retrieve(
                 q,
                 top_k=req.top_k,
                 expand_lists=True,
-                query_rewrite_enabled=req.query_rewrite_enabled,
+                query_rewrite_enabled=query_rewrite_enabled,
             )
         hit_count = len(hits or [])
 
@@ -133,7 +140,7 @@ def ask(req: AskRequest, request: Request):
             "latency_ms": latency_ms,
             "mode": req.mode,
             "top_k": req.top_k,
-            "query_rewrite_enabled": req.query_rewrite_enabled,
+            "query_rewrite_enabled": query_rewrite_enabled,
             "hit_count": hit_count,
             "client_ip": request.client.host if request.client else None,
             "question_len": len(q),
