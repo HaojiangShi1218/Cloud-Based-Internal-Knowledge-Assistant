@@ -11,6 +11,10 @@ from app.rag import retrieve
 from app.formatter import format_answer
 from app.cache import clear_cache
 from app.llm import select_llm_hits, synthesize_answer
+from app.utils.timing import span
+import logging
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -66,54 +70,61 @@ def ask(req: AskRequest, request: Request):
     t0 = time.perf_counter()
     ok = False
     hit_count = 0
+    spans = {}
 
     q = (req.question or "").strip()
     if not q:
         raise HTTPException(status_code=400, detail="Question is required")
 
     try:
-        hits = retrieve(
-            q,
-            top_k=req.top_k,
-            expand_lists=True,
-            query_rewrite_enabled=req.query_rewrite_enabled,
-        )
+        with span("retrieve", spans):
+            hits = retrieve(
+                q,
+                top_k=req.top_k,
+                expand_lists=True,
+                query_rewrite_enabled=req.query_rewrite_enabled,
+            )
         hit_count = len(hits or [])
 
         if not hits:
             ok = True
             return {"question": q, "answer": NO_HITS, "citations": []}
 
-        if req.mode == "llm":
-            # hard cap to prevent accidental spend (server-side only)
-            max_toks = int(getattr(settings, "MAX_ANSWER_TOKENS", 250))
-            max_toks = max(32, min(max_toks, 400))  # clamp
+        with span("select_llm_hits", spans):
             llm_hits = select_llm_hits(hits, max_hits=req.top_k)
-            answer, used_hits = synthesize_answer(
-                q,
-                llm_hits,
-                max_tokens=max_toks,
-            )
+
+        if req.mode == "llm":
+            max_toks = int(getattr(settings, "MAX_ANSWER_TOKENS", 250))
+            max_toks = max(32, min(max_toks, 400))
+
+            with span("synthesize_answer", spans):
+                answer, used_hits = synthesize_answer(
+                    q,
+                    llm_hits,
+                    max_tokens=max_toks,
+                )
             citations_src = used_hits
         else:
-            llm_hits = select_llm_hits(hits, max_hits=req.top_k)
-            answer = format_answer(llm_hits, question=q)
+            with span("format_answer", spans):
+                answer = format_answer(llm_hits, question=q)
             citations_src = llm_hits
 
-        citations = [
-            {
-                "rank": h["rank"],
-                "source": h["source"],
-                "page_num": h.get("page_num"),
-                "page_end": h.get("page_end"),
-                "chunk_index": h["chunk_index"],
-                "score": h["score"],
-            }
-            for h in (citations_src or [])
-        ]
+        with span("build_citations", spans):
+            citations = [
+                {
+                    "rank": h["rank"],
+                    "source": h["source"],
+                    "page_num": h.get("page_num"),
+                    "page_end": h.get("page_end"),
+                    "chunk_index": h["chunk_index"],
+                    "score": h["score"],
+                }
+                for h in (citations_src or [])
+            ]
 
         ok = True
         return {"question": q, "answer": answer, "citations": citations}
+
     finally:
         latency_ms = round((time.perf_counter() - t0) * 1000, 2)
         log_obj = {
@@ -125,9 +136,9 @@ def ask(req: AskRequest, request: Request):
             "query_rewrite_enabled": req.query_rewrite_enabled,
             "hit_count": hit_count,
             "client_ip": request.client.host if request.client else None,
-            # privacy-safe question logging
             "question_len": len(q),
             "question_sha256": sha256(q.encode("utf-8")).hexdigest(),
             "question_preview": q[:80],
+            "spans_ms": spans,          # <-- the money line
         }
         logger.info(json.dumps(log_obj, ensure_ascii=False))
