@@ -9,6 +9,7 @@ from loguru import logger
 from app.config import settings
 from app.embeddings import embed_texts
 from app.llm import rewrite_queries
+from app.utils.timing import span
 from app.vectorstores.opensearch_store import knn_search
 
 # Retrieval tuning
@@ -386,108 +387,116 @@ def retrieve(
     expand_lists: bool = False,
     query_rewrite_enabled: Optional[bool] = None,
 ) -> List[Dict[str, Any]]:
+    spans: Dict[str, float] = {}
     is_yesno = _is_yesno_question(query)
 
-    queries_for_retrieval = [query]
-    if query_rewrite_enabled is None:
-        query_rewrite_enabled = getattr(settings, "QUERY_REWRITE_ENABLED", False)
-    if query_rewrite_enabled:
-        k = int(getattr(settings, "QUERY_REWRITE_K", 3))
-        rewrites = rewrite_queries(query, k=k)
-        if rewrites and len(rewrites) > 1:
-            queries_for_retrieval = rewrites
-            logger.info(f"Query rewrites: {queries_for_retrieval[1:]!r}")
+    with span("query_rewrite", spans):
+        queries_for_retrieval = [query]
+        if query_rewrite_enabled is None:
+            query_rewrite_enabled = getattr(settings, "QUERY_REWRITE_ENABLED", False)
+        if query_rewrite_enabled:
+            k = int(getattr(settings, "QUERY_REWRITE_K", 3))
+            rewrites = rewrite_queries(query, k=k)
+            if rewrites and len(rewrites) > 1:
+                queries_for_retrieval = rewrites
+                logger.info(f"Query rewrites: {queries_for_retrieval[1:]!r}")
 
-    # Embed each query variant and fuse OpenSearch candidates by max semantic score.
-    q_embs = embed_texts(queries_for_retrieval).astype(np.float32)
-    if q_embs.ndim == 1:
-        q_embs = q_embs.reshape(1, -1)
-    top_n = max(MIN_CANDIDATES, min(MAX_CANDIDATES, top_k * CANDIDATE_MULT))
-    candidate_map: Dict[Tuple[str, int, Any], Dict[str, Any]] = {}
-    for emb in q_embs:
-        hits = knn_search(emb.tolist(), k=max(top_n * 2, 20))
-        for h in hits:
-            key = (
-                str(h.get("doc_id", "")),
-                int(h.get("chunk_id", -1) or -1),
-                h.get("page"),
-            )
-            semantic = float(h.get("score", 0.0))
-            prev = candidate_map.get(key)
-            if not prev or semantic > prev["semantic"]:
-                candidate_map[key] = {"semantic": semantic, "hit": h}
+    with span("embed_queries", spans):
+        q_embs = embed_texts(queries_for_retrieval).astype(np.float32)
+        if q_embs.ndim == 1:
+            q_embs = q_embs.reshape(1, -1)
+
+    with span("opensearch_semantic", spans):
+        # Embed each query variant and fuse OpenSearch candidates by max semantic score.
+        top_n = max(MIN_CANDIDATES, min(MAX_CANDIDATES, top_k * CANDIDATE_MULT))
+        candidate_map: Dict[Tuple[str, int, Any], Dict[str, Any]] = {}
+        for emb in q_embs:
+            hits = knn_search(emb.tolist(), k=max(top_n * 2, 20))
+            for h in hits:
+                key = (
+                    str(h.get("doc_id", "")),
+                    int(h.get("chunk_id", -1) or -1),
+                    h.get("page"),
+                )
+                semantic = float(h.get("score", 0.0))
+                prev = candidate_map.get(key)
+                if not prev or semantic > prev["semantic"]:
+                    candidate_map[key] = {"semantic": semantic, "hit": h}
 
     if candidate_map:
         top_sem = sorted((v["semantic"] for v in candidate_map.values()), reverse=True)
         logger.info(f"Top OpenSearch (semantic) scores: {[round(float(s), 4) for s in top_sem[:10]]}")
 
-    os_meta = []
-    for v in candidate_map.values():
-        hit = v["hit"]
-        os_meta.append({"text": hit.get("text", "")})
-    stats = _compute_corpus_stats(os_meta)
-    logger.info(f"Corpus stats: docs={stats['n_docs']} avgdl={round(stats['avgdl'], 1)} tokens={len(stats['idf'])}")
+    with span("bm25_lexical", spans):
+        os_meta = []
+        for v in candidate_map.values():
+            hit = v["hit"]
+            os_meta.append({"text": hit.get("text", "")})
+        stats = _compute_corpus_stats(os_meta)
+        logger.info(f"Corpus stats: docs={stats['n_docs']} avgdl={round(stats['avgdl'], 1)} tokens={len(stats['idf'])}")
 
-    candidates = []
-    for data in candidate_map.values():
-        m = data["hit"]
-        semantic = float(data["semantic"])
-        text = m.get("text", "")
-        # Blend lexical scores across original + rewrites.
-        lex_scores = [_lexical_score(qv, text) for qv in queries_for_retrieval]
-        lexical = max(lex_scores) if lex_scores else 0.0
-        bm25_scores = [_bm25_score(qv, text, stats) for qv in queries_for_retrieval]
-        bm25 = max(bm25_scores) if bm25_scores else 0.0
-        bm25_norm = _bm25_norm(bm25)
-        phrase_scores = [_phrase_boost(qv, text) for qv in queries_for_retrieval]
-        phrase = max(phrase_scores) if phrase_scores else 0.0
-        focus_cov = _focus_coverage(queries_for_retrieval[0], text)
-        yesno_bonus = _yesno_boost(query, text)
-        proximity_scores = [_proximity_boost(qv, text) for qv in queries_for_retrieval]
-        proximity = max(proximity_scores) if proximity_scores else 0.0
-        between_scores = [_between_boost(qv, text) for qv in queries_for_retrieval]
-        between_bonus = max(between_scores) if between_scores else 0.0
-        final = semantic + (BM25_ALPHA * bm25_norm) + phrase + yesno_bonus + proximity + between_bonus
-        candidates.append({
-            "rank": 0,
-            "score": semantic,  # keep key name for response compatibility
-            "semantic_score": semantic,
-            "lexical_score": lexical,
-            "bm25_score": bm25,
-            "bm25_norm": bm25_norm,
-            "phrase_bonus": phrase,
-            "focus_coverage": focus_cov,
-            "yesno_bonus": yesno_bonus,
-            "proximity_bonus": proximity,
-            "between_bonus": between_bonus,
-            "final_score": final,
-            "source": m.get("source", ""),
-            "page_num": m.get("page"),
-            "page_end": m.get("page"),
-            "chunk_index": m.get("chunk_id"),
-            "doc_id": m.get("doc_id"),
-            "doc_chunk_seq": None,
-            "text": text,
-        })
+        candidates = []
+        for data in candidate_map.values():
+            m = data["hit"]
+            semantic = float(data["semantic"])
+            text = m.get("text", "")
+            # Blend lexical scores across original + rewrites.
+            lex_scores = [_lexical_score(qv, text) for qv in queries_for_retrieval]
+            lexical = max(lex_scores) if lex_scores else 0.0
+            bm25_scores = [_bm25_score(qv, text, stats) for qv in queries_for_retrieval]
+            bm25 = max(bm25_scores) if bm25_scores else 0.0
+            bm25_norm = _bm25_norm(bm25)
+            phrase_scores = [_phrase_boost(qv, text) for qv in queries_for_retrieval]
+            phrase = max(phrase_scores) if phrase_scores else 0.0
+            focus_cov = _focus_coverage(queries_for_retrieval[0], text)
+            yesno_bonus = _yesno_boost(query, text)
+            proximity_scores = [_proximity_boost(qv, text) for qv in queries_for_retrieval]
+            proximity = max(proximity_scores) if proximity_scores else 0.0
+            between_scores = [_between_boost(qv, text) for qv in queries_for_retrieval]
+            between_bonus = max(between_scores) if between_scores else 0.0
+            final = semantic + (BM25_ALPHA * bm25_norm) + phrase + yesno_bonus + proximity + between_bonus
+            candidates.append({
+                "rank": 0,
+                "score": semantic,  # keep key name for response compatibility
+                "semantic_score": semantic,
+                "lexical_score": lexical,
+                "bm25_score": bm25,
+                "bm25_norm": bm25_norm,
+                "phrase_bonus": phrase,
+                "focus_coverage": focus_cov,
+                "yesno_bonus": yesno_bonus,
+                "proximity_bonus": proximity,
+                "between_bonus": between_bonus,
+                "final_score": final,
+                "source": m.get("source", ""),
+                "page_num": m.get("page"),
+                "page_end": m.get("page"),
+                "chunk_index": m.get("chunk_id"),
+                "doc_id": m.get("doc_id"),
+                "doc_chunk_seq": None,
+                "text": text,
+            })
 
-    candidates.sort(key=lambda x: x["final_score"], reverse=True)
+    with span("hybrid_merge", spans):
+        candidates.sort(key=lambda x: x["final_score"], reverse=True)
 
-    if is_yesno:
-        high_cov = [c for c in candidates if c.get("focus_coverage", 0.0) >= YESNO_COVERAGE_GATE]
-        if high_cov:
-            ids = {
-                (c.get("doc_id"), c.get("doc_chunk_seq"), c.get("page_num"), c.get("chunk_index"))
-                for c in high_cov
-            }
-            tail = [
-                c for c in candidates
-                if (c.get("doc_id"), c.get("doc_chunk_seq"), c.get("page_num"), c.get("chunk_index")) not in ids
-            ]
-            candidates = high_cov + tail
+        if is_yesno:
+            high_cov = [c for c in candidates if c.get("focus_coverage", 0.0) >= YESNO_COVERAGE_GATE]
+            if high_cov:
+                ids = {
+                    (c.get("doc_id"), c.get("doc_chunk_seq"), c.get("page_num"), c.get("chunk_index"))
+                    for c in high_cov
+                }
+                tail = [
+                    c for c in candidates
+                    if (c.get("doc_id"), c.get("doc_chunk_seq"), c.get("page_num"), c.get("chunk_index")) not in ids
+                ]
+                candidates = high_cov + tail
 
-    out = candidates[:top_k]
-    for i, r in enumerate(out, start=1):
-        r["rank"] = i
+        out = candidates[:top_k]
+        for i, r in enumerate(out, start=1):
+            r["rank"] = i
 
     logger.info(f"Top hybrid final scores: {[round(r['final_score'], 4) for r in out]}")
+    logger.info("RETRIEVE_SPANS {}", spans)
     return out
