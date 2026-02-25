@@ -27,3 +27,31 @@ services:
       - ui
       - api
     restart: unless-stopped
+
+  fluent-bit:
+    image: public.ecr.aws/aws-observability/aws-for-fluent-bit:latest
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ./deploy/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+    environment:
+      - AWS_REGION=us-east-1
+    restart: unless-stopped
+
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    environment:
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+      - DISABLE_SECURITY_PLUGIN=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    expose:
+      - "9200"
+    restart: unless-stopped
+volumes:
+  opensearch-data:
