@@ -393,6 +393,7 @@ Rules:
 - Use only the context.
 - Every claim must cite at least one source id.
 - Do not use citation ids outside 1..{len(hits)}.
+- If multiple snippets support a claim, cite the snippet from the most specific section directly about the asked concept.
 - {"final_answer must start with Yes or No for this question." if is_yesno else list_rule}
 - If evidence is insufficient, return:
   {{"final_answer":"{NO_ANSWER}","claims":[]}}

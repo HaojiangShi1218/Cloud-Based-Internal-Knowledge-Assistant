@@ -437,6 +437,9 @@ def retrieve(
 
     with span("query_rewrite", spans):
         queries_for_retrieval = [query]
+        # Rewrite drift is most harmful for yes/no questions with negation semantics.
+        if _is_yesno_question(query) and _has_negation(query):
+            query_rewrite_enabled = False
         if query_rewrite_enabled is None:
             query_rewrite_enabled = getattr(settings, "QUERY_REWRITE_ENABLED", False)
         if query_rewrite_enabled:
@@ -492,10 +495,8 @@ def retrieve(
             phrase = _phrase_boost(query, text)
             focus_cov = _focus_coverage(queries_for_retrieval[0], text)
             yesno_bonus = _yesno_boost(query, text)
-            proximity_scores = [_proximity_boost(qv, text) for qv in queries_for_retrieval]
-            proximity = max(proximity_scores) if proximity_scores else 0.0
-            between_scores = [_between_boost(qv, text) for qv in queries_for_retrieval]
-            between_bonus = max(between_scores) if between_scores else 0.0
+            proximity = _proximity_boost(query, text)
+            between_bonus = _between_boost(query, text)
             final = semantic + (BM25_ALPHA * bm25_norm) + phrase + yesno_bonus + proximity + between_bonus
             candidates.append({
                 "rank": 0,
