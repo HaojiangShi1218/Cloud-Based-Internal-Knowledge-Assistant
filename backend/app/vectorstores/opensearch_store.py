@@ -43,7 +43,7 @@ def knn_search(query_vector: List[float], k: int) -> List[Dict[str, Any]]:
     client = get_os_client()
     q = {
         "size": k,
-        "_source": ["doc_id", "chunk_id", "text", "page", "source", "title"],
+        "_source": ["doc_id", "chunk_id", "doc_chunk_seq", "text", "page", "page_end", "source", "title"],
         "query": {
             "knn": {
                 "embedding": {
@@ -64,8 +64,50 @@ def knn_search(query_vector: List[float], k: int) -> List[Dict[str, Any]]:
                 "text": s.get("text", ""),
                 "source": s.get("source", ""),
                 "page": s.get("page"),
+                "page_end": s.get("page_end", s.get("page")),
                 "doc_id": s.get("doc_id", ""),
                 "chunk_id": s.get("chunk_id"),
+                "doc_chunk_seq": s.get("doc_chunk_seq"),
+                "title": s.get("title", ""),
+                "score": float(h.get("_score", 0.0)),
+            }
+        )
+    return out
+
+
+def fetch_doc_seq_chunks(doc_id: str, seq_values: List[int]) -> List[Dict[str, Any]]:
+    if not doc_id or not seq_values:
+        return []
+
+    client = get_os_client()
+    q = {
+        "size": len(seq_values),
+        "_source": ["doc_id", "chunk_id", "doc_chunk_seq", "text", "page", "page_end", "source", "title"],
+        "query": {
+            "bool": {
+                "must": [
+                    {"term": {"doc_id": doc_id}},
+                    {"terms": {"doc_chunk_seq": seq_values}},
+                ]
+            }
+        },
+        "sort": [{"doc_chunk_seq": {"order": "asc"}}],
+    }
+
+    resp = client.search(index=settings.OPENSEARCH_INDEX, body=q)
+    hits = resp.get("hits", {}).get("hits", [])
+    out: List[Dict[str, Any]] = []
+    for h in hits:
+        s = h.get("_source", {})
+        out.append(
+            {
+                "text": s.get("text", ""),
+                "source": s.get("source", ""),
+                "page": s.get("page"),
+                "page_end": s.get("page_end", s.get("page")),
+                "doc_id": s.get("doc_id", ""),
+                "chunk_id": s.get("chunk_id"),
+                "doc_chunk_seq": s.get("doc_chunk_seq"),
                 "title": s.get("title", ""),
                 "score": float(h.get("_score", 0.0)),
             }

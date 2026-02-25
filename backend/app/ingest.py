@@ -186,7 +186,9 @@ def main():
             source_doc = {
                 "chunk_id": chunk_id,
                 "doc_id": doc_id,
+                "doc_chunk_seq": d["doc_chunk_seq"],
                 "page": page,
+                "page_end": d.get("page_end", page),
                 "source": d["source"],
                 "title": d["title"],
                 "text": d["text"],
@@ -213,6 +215,7 @@ def main():
     for (source, text, extra) in docs:
         doc_id = extra.get("doc_id")
         page_num = extra.get("page_num")
+        page_end = extra.get("page_end", page_num)
         chunks = chunk_text(text)
         for chunk_index, c in enumerate(chunks):
             chunk_buf.append(c)
@@ -222,6 +225,7 @@ def main():
                     "source": source,
                     "title": source,
                     "page": page_num if page_num is not None else 0,
+                    "page_end": page_end if page_end is not None else (page_num if page_num is not None else 0),
                     "chunk_id": chunk_index,
                     "doc_chunk_seq": doc_seq_counters.get(doc_id, 0),
                     "text": c,

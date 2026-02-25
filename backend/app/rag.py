@@ -10,7 +10,7 @@ from app.config import settings
 from app.embeddings import embed_texts
 from app.llm import rewrite_queries
 from app.utils.timing import span
-from app.vectorstores.opensearch_store import knn_search
+from app.vectorstores.opensearch_store import knn_search, fetch_doc_seq_chunks
 
 # Retrieval tuning
 CANDIDATE_MULT = 12
@@ -329,6 +329,51 @@ def _expand_list_context(meta: List[Dict[str, Any]], query: str, hits: List[Dict
         return hits
 
     lut = _build_doc_seq_lookup(meta)
+    for h in hits:
+        doc_id = h.get("doc_id")
+        seq = h.get("doc_chunk_seq")
+        if not doc_id or not isinstance(seq, int):
+            continue
+        lut[(doc_id, seq)] = {
+            "source": h.get("source", ""),
+            "page_num": h.get("page_num"),
+            "page_end": h.get("page_end", h.get("page_num")),
+            "chunk_index": h.get("chunk_index"),
+            "doc_id": doc_id,
+            "doc_chunk_seq": seq,
+            "text": h.get("text", ""),
+        }
+
+    fetch_plan: Dict[str, List[int]] = {}
+    for h in hits:
+        doc_id = h.get("doc_id")
+        seq = h.get("doc_chunk_seq")
+        if not doc_id or not isinstance(seq, int):
+            continue
+        for off in range(1, LIST_EXPAND_WINDOW + 1):
+            key = (doc_id, seq + off)
+            if key in lut:
+                continue
+            fetch_plan.setdefault(doc_id, []).append(seq + off)
+
+    for doc_id, seqs in fetch_plan.items():
+        want = sorted(set(seqs))
+        if not want:
+            continue
+        for m in fetch_doc_seq_chunks(doc_id, want):
+            seq = m.get("doc_chunk_seq")
+            if not isinstance(seq, int):
+                continue
+            lut[(doc_id, seq)] = {
+                "source": m.get("source", ""),
+                "page_num": m.get("page"),
+                "page_end": m.get("page_end", m.get("page")),
+                "chunk_index": m.get("chunk_id"),
+                "doc_id": m.get("doc_id"),
+                "doc_chunk_seq": seq,
+                "text": m.get("text", ""),
+            }
+
     seen = {
         (h.get("doc_id"), h.get("doc_chunk_seq"))
         for h in hits
@@ -467,10 +512,10 @@ def retrieve(
                 "final_score": final,
                 "source": m.get("source", ""),
                 "page_num": m.get("page"),
-                "page_end": m.get("page"),
+                "page_end": m.get("page_end", m.get("page")),
                 "chunk_index": m.get("chunk_id"),
                 "doc_id": m.get("doc_id"),
-                "doc_chunk_seq": None,
+                "doc_chunk_seq": m.get("doc_chunk_seq"),
                 "text": text,
             })
 
@@ -493,6 +538,9 @@ def retrieve(
         out = candidates[:top_k]
         for i, r in enumerate(out, start=1):
             r["rank"] = i
+
+        if expand_lists:
+            out = _expand_list_context([], query, out)
 
     logger.info(f"Top hybrid final scores: {[round(r['final_score'], 4) for r in out]}")
     logger.info("RETRIEVE_SPANS {}", spans)
