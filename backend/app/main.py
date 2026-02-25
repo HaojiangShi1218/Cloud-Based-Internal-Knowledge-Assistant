@@ -122,7 +122,8 @@ def ask(req: AskRequest, request: Request):
                     "page_num": h.get("page_num"),
                     "page_end": h.get("page_end"),
                     "chunk_index": h["chunk_index"],
-                    "score": h["score"],
+                    "semantic_score": h.get("semantic_score", h.get("score")),
+                    "final_score": h.get("final_score"),
                 }
                 for h in (citations_src or [])
             ]

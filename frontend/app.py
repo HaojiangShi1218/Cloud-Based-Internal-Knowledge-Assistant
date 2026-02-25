@@ -105,7 +105,8 @@ if ask_btn:
             rank = c.get("rank", "?")
             src = c.get("source", "Unknown")
             page = c.get("page_num", None)
-            score = c.get("score", None)
+            semantic_score = c.get("semantic_score", None)
+            final_score = c.get("final_score", None)
             chunk = c.get("chunk_index", None)
 
             label_bits = [f"#{rank}", src]
@@ -113,8 +114,16 @@ if ask_btn:
                 label_bits.append(f"p.{page}")
             if chunk is not None:
                 label_bits.append(f"chunk {chunk}")
-            if score is not None:
-                label_bits.append(f"score {score:.3f}" if isinstance(score, (int, float)) else f"score {score}")
+            if final_score is not None:
+                label_bits.append(
+                    f"final {final_score:.3f}" if isinstance(final_score, (int, float)) else f"final {final_score}"
+                )
+            if semantic_score is not None:
+                label_bits.append(
+                    f"semantic {semantic_score:.3f}"
+                    if isinstance(semantic_score, (int, float))
+                    else f"semantic {semantic_score}"
+                )
 
             with st.expander(" • ".join(label_bits)):
                 st.json(c)

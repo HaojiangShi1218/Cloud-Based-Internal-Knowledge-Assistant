@@ -263,32 +263,33 @@ def _cap_citations_by_answer(payload: Dict[str, Any], hits: List[Dict[str, Any]]
         return payload, []
 
     claims = payload.get("claims", [])
-    key_text = " ".join([final_answer] + [c.get("claim", "") for c in claims if isinstance(c, dict)])
-    key_tokens = list(dict.fromkeys(_tokens(key_text)))
-    if not key_tokens:
-        return payload, hits
-
-    key_set = set(key_tokens)
-    scored: List[tuple[float, int]] = []
-    for idx, h in enumerate(hits):
-        tset = set(_tokens(h.get("text", "")))
-        if not tset:
-            continue
-        overlap = sum(1 for t in key_set if t in tset) / max(1, len(key_set))
-        if overlap > 0:
-            scored.append((overlap, idx))
-
-    if not scored:
+    cited_ids = {
+        int(c)
+        for cl in claims
+        if isinstance(cl, dict)
+        for c in cl.get("citations", [])
+        if isinstance(c, int)
+    }
+    if not cited_ids:
         return {"final_answer": NO_ANSWER, "claims": []}, []
 
-    scored.sort(key=lambda x: (-x[0], hits[x[1]].get("rank", x[1] + 1)))
-    kept_idxs = [idx for _, idx in scored]
+    # Keep retrieval order; only filter to ids actually cited by claims.
+    kept_idxs: List[int] = []
+    rank_map: Dict[int, int] = {}
+    for idx, h in enumerate(hits):
+        old_rank = int(h.get("rank", idx + 1))
+        if old_rank not in cited_ids:
+            continue
+        rank_map[old_rank] = len(kept_idxs) + 1
+        kept_idxs.append(idx)
+
+    if not kept_idxs:
+        return {"final_answer": NO_ANSWER, "claims": []}, []
 
     new_hits: List[Dict[str, Any]] = [dict(hits[idx]) for idx in kept_idxs]
     for i, h in enumerate(new_hits, start=1):
         h["rank"] = i
 
-    rank_map = {hits[idx].get("rank", idx + 1): i + 1 for i, idx in enumerate(kept_idxs)}
     new_claims: List[Dict[str, Any]] = []
     for cl in claims:
         if not isinstance(cl, dict):
