@@ -69,7 +69,7 @@ def knn_search(query_vector: List[float], k: int) -> List[Dict[str, Any]]:
                 "chunk_id": s.get("chunk_id"),
                 "doc_chunk_seq": s.get("doc_chunk_seq"),
                 "title": s.get("title", ""),
-                "score": float(h.get("_score", 0.0)),
+                "score": float(h.get("_score") or 0.0),
             }
         )
     return out
@@ -109,7 +109,7 @@ def fetch_doc_seq_chunks(doc_id: str, seq_values: List[int]) -> List[Dict[str, A
                 "chunk_id": s.get("chunk_id"),
                 "doc_chunk_seq": s.get("doc_chunk_seq"),
                 "title": s.get("title", ""),
-                "score": float(h.get("_score", 0.0)),
+                "score": float(h.get("_score") or 0.0),
             }
         )
     return out
