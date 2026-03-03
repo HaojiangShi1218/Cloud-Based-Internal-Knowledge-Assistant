@@ -437,9 +437,6 @@ def retrieve(
 
     with span("query_rewrite", spans):
         queries_for_retrieval = [query]
-        # Rewrite drift is most harmful for yes/no questions with negation semantics.
-        if _is_yesno_question(query) and _has_negation(query):
-            query_rewrite_enabled = False
         if query_rewrite_enabled is None:
             query_rewrite_enabled = getattr(settings, "QUERY_REWRITE_ENABLED", False)
         if query_rewrite_enabled:
@@ -488,15 +485,20 @@ def retrieve(
             m = data["hit"]
             semantic = float(data["semantic"])
             text = m.get("text", "")
-            # Keep lexical grounding on the original user query to avoid rewrite drift.
-            lexical = _lexical_score(query, text)
-            bm25 = _bm25_score(query, text, stats)
+            # Blend lexical scores across original + rewrites.
+            lex_scores = [_lexical_score(qv, text) for qv in queries_for_retrieval]
+            lexical = max(lex_scores) if lex_scores else 0.0
+            bm25_scores = [_bm25_score(qv, text, stats) for qv in queries_for_retrieval]
+            bm25 = max(bm25_scores) if bm25_scores else 0.0
             bm25_norm = _bm25_norm(bm25)
-            phrase = _phrase_boost(query, text)
+            phrase_scores = [_phrase_boost(qv, text) for qv in queries_for_retrieval]
+            phrase = max(phrase_scores) if phrase_scores else 0.0
             focus_cov = _focus_coverage(queries_for_retrieval[0], text)
             yesno_bonus = _yesno_boost(query, text)
-            proximity = _proximity_boost(query, text)
-            between_bonus = _between_boost(query, text)
+            proximity_scores = [_proximity_boost(qv, text) for qv in queries_for_retrieval]
+            proximity = max(proximity_scores) if proximity_scores else 0.0
+            between_scores = [_between_boost(qv, text) for qv in queries_for_retrieval]
+            between_bonus = max(between_scores) if between_scores else 0.0
             final = semantic + (BM25_ALPHA * bm25_norm) + phrase + yesno_bonus + proximity + between_bonus
             candidates.append({
                 "rank": 0,

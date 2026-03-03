@@ -21,10 +21,6 @@ MAX_CLAIMS = 8
 _CITE_RE = re.compile(r"\[(\d+)\]")
 _WORD_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 _YESNO_RE = re.compile(r"^\s*(is|are|was|were|do|does|did|can|could|should|would|will|has|have|had)\b", re.IGNORECASE)
-_LIST_Q_RE = re.compile(
-    r"\b(what are|which are|list|areas|principles|components|pillars|focus on)\b",
-    re.IGNORECASE,
-)
 _STOPWORDS = {
     "the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with", "is", "are", "was", "were",
     "be", "as", "what", "which", "who", "whom", "this", "that", "these", "those", "it", "its", "from",
@@ -118,10 +114,6 @@ Question:
 
 def _is_yesno_question(question: str) -> bool:
     return bool(_YESNO_RE.match(question or ""))
-
-
-def _is_list_question(question: str) -> bool:
-    return bool(_LIST_Q_RE.search(question or ""))
 
 
 def select_llm_hits(hits: List[Dict[str, Any]], max_hits: int = MAX_HITS_FOR_LLM) -> List[Dict[str, Any]]:
@@ -271,33 +263,32 @@ def _cap_citations_by_answer(payload: Dict[str, Any], hits: List[Dict[str, Any]]
         return payload, []
 
     claims = payload.get("claims", [])
-    cited_ids = {
-        int(c)
-        for cl in claims
-        if isinstance(cl, dict)
-        for c in cl.get("citations", [])
-        if isinstance(c, int)
-    }
-    if not cited_ids:
-        return {"final_answer": NO_ANSWER, "claims": []}, []
+    key_text = " ".join([final_answer] + [c.get("claim", "") for c in claims if isinstance(c, dict)])
+    key_tokens = list(dict.fromkeys(_tokens(key_text)))
+    if not key_tokens:
+        return payload, hits
 
-    # Keep retrieval order; only filter to ids actually cited by claims.
-    kept_idxs: List[int] = []
-    rank_map: Dict[int, int] = {}
+    key_set = set(key_tokens)
+    scored: List[tuple[float, int]] = []
     for idx, h in enumerate(hits):
-        old_rank = int(h.get("rank", idx + 1))
-        if old_rank not in cited_ids:
+        tset = set(_tokens(h.get("text", "")))
+        if not tset:
             continue
-        rank_map[old_rank] = len(kept_idxs) + 1
-        kept_idxs.append(idx)
+        overlap = sum(1 for t in key_set if t in tset) / max(1, len(key_set))
+        if overlap > 0:
+            scored.append((overlap, idx))
 
-    if not kept_idxs:
+    if not scored:
         return {"final_answer": NO_ANSWER, "claims": []}, []
+
+    scored.sort(key=lambda x: (-x[0], hits[x[1]].get("rank", x[1] + 1)))
+    kept_idxs = [idx for _, idx in scored]
 
     new_hits: List[Dict[str, Any]] = [dict(hits[idx]) for idx in kept_idxs]
     for i, h in enumerate(new_hits, start=1):
         h["rank"] = i
 
+    rank_map = {hits[idx].get("rank", idx + 1): i + 1 for i, idx in enumerate(kept_idxs)}
     new_claims: List[Dict[str, Any]] = []
     for cl in claims:
         if not isinstance(cl, dict):
@@ -364,13 +355,6 @@ def synthesize_answer(
     client = OpenAI(api_key=settings.OPENAI_API_KEY)
     context = build_context(hits)
     is_yesno = _is_yesno_question(question)
-    is_list = _is_list_question(question)
-    list_rule = (
-        "For this list-style question, enumerate all distinct items explicitly supported by context; "
-        "use one claim per item and keep original terminology."
-        if is_list
-        else "Keep final_answer concise and factual."
-    )
 
     prompt = f"""Context:
 {context}
@@ -393,8 +377,7 @@ Rules:
 - Use only the context.
 - Every claim must cite at least one source id.
 - Do not use citation ids outside 1..{len(hits)}.
-- If multiple snippets support a claim, cite the snippet from the most specific section directly about the asked concept.
-- {"final_answer must start with Yes or No for this question." if is_yesno else list_rule}
+- {"final_answer must start with Yes or No for this question." if is_yesno else "Keep final_answer concise and factual."}
 - If evidence is insufficient, return:
   {{"final_answer":"{NO_ANSWER}","claims":[]}}
 - Output JSON only, no markdown.
