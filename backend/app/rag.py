@@ -485,11 +485,14 @@ def retrieve(
             m = data["hit"]
             semantic = float(data["semantic"])
             text = m.get("text", "")
-            # Keep lexical scoring grounded on the original user query.
-            lexical = _lexical_score(query, text)
-            bm25 = _bm25_score(query, text, stats)
+            # Blend lexical scores across original + rewrites.
+            lex_scores = [_lexical_score(qv, text) for qv in queries_for_retrieval]
+            lexical = max(lex_scores) if lex_scores else 0.0
+            bm25_scores = [_bm25_score(qv, text, stats) for qv in queries_for_retrieval]
+            bm25 = max(bm25_scores) if bm25_scores else 0.0
             bm25_norm = _bm25_norm(bm25)
-            phrase = _phrase_boost(query, text)
+            phrase_scores = [_phrase_boost(qv, text) for qv in queries_for_retrieval]
+            phrase = max(phrase_scores) if phrase_scores else 0.0
             focus_cov = _focus_coverage(queries_for_retrieval[0], text)
             yesno_bonus = _yesno_boost(query, text)
             proximity_scores = [_proximity_boost(qv, text) for qv in queries_for_retrieval]
