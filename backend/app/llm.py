@@ -250,6 +250,64 @@ def _validate_payload(payload: Optional[Dict[str, Any]], hits: List[Dict[str, An
     return {"final_answer": final_answer, "claims": normalized_claims}
 
 
+def _strip_citations(text: str) -> str:
+    return _CITE_RE.sub("", text or "").strip()
+
+
+def _cap_citations_by_answer(payload: Dict[str, Any], hits: List[Dict[str, Any]]) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    if not hits:
+        return payload, []
+
+    final_answer = payload.get("final_answer", "")
+    if final_answer == NO_ANSWER:
+        return payload, []
+
+    claims = payload.get("claims", [])
+    key_text = " ".join([final_answer] + [c.get("claim", "") for c in claims if isinstance(c, dict)])
+    key_tokens = list(dict.fromkeys(_tokens(key_text)))
+    if not key_tokens:
+        return payload, hits
+
+    key_set = set(key_tokens)
+    scored: List[tuple[float, int]] = []
+    for idx, h in enumerate(hits):
+        tset = set(_tokens(h.get("text", "")))
+        if not tset:
+            continue
+        overlap = sum(1 for t in key_set if t in tset) / max(1, len(key_set))
+        if overlap > 0:
+            scored.append((overlap, idx))
+
+    if not scored:
+        return {"final_answer": NO_ANSWER, "claims": []}, []
+
+    scored.sort(key=lambda x: (-x[0], hits[x[1]].get("rank", x[1] + 1)))
+    kept_idxs = [idx for _, idx in scored]
+
+    new_hits: List[Dict[str, Any]] = [dict(hits[idx]) for idx in kept_idxs]
+    for i, h in enumerate(new_hits, start=1):
+        h["rank"] = i
+
+    rank_map = {hits[idx].get("rank", idx + 1): i + 1 for i, idx in enumerate(kept_idxs)}
+    new_claims: List[Dict[str, Any]] = []
+    for cl in claims:
+        if not isinstance(cl, dict):
+            continue
+        cite_ids = cl.get("citations", [])
+        if not isinstance(cite_ids, list):
+            continue
+        mapped = [rank_map[c] for c in cite_ids if c in rank_map]
+        mapped = sorted(set(mapped))
+        if mapped:
+            new_claims.append({"claim": cl.get("claim", ""), "citations": mapped})
+
+    if not new_claims:
+        return {"final_answer": NO_ANSWER, "claims": []}, []
+
+    cleaned_answer = _strip_citations(final_answer)
+    return {"final_answer": cleaned_answer, "claims": new_claims}, new_hits
+
+
 def _render_answer(payload: Dict[str, Any]) -> str:
     final_answer = payload["final_answer"].strip()
     if final_answer == NO_ANSWER:
@@ -286,8 +344,10 @@ def synthesize_answer(
         cached_obj = _extract_json_object(cached)
         valid = _validate_payload(cached_obj, hits, question)
         if valid:
-            answer = _render_answer(valid)
-            return answer, hits
+            max_hits = MAX_HITS_FOR_LLM
+            capped_payload, capped_hits = _cap_citations_by_answer(valid, hits)
+            answer = _render_answer(capped_payload)
+            return answer, capped_hits
 
     if not settings.OPENAI_API_KEY:
         return "LLM mode is not configured (missing OPENAI_API_KEY).", []
@@ -345,9 +405,11 @@ Rules:
         parsed = _extract_json_object(raw)
         valid = _validate_payload(parsed, hits, question)
         if valid:
-            answer = _render_answer(valid)
+            max_hits = MAX_HITS_FOR_LLM
+            capped_payload, capped_hits = _cap_citations_by_answer(valid, hits)
+            answer = _render_answer(capped_payload)
             set_cached_answer(cache_key, json.dumps(valid))
-            return answer, hits
+            return answer, capped_hits
 
     set_cached_answer(cache_key, json.dumps({"final_answer": NO_ANSWER, "claims": []}))
     return answer, []
