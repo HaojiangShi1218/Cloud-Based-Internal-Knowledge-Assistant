@@ -4,6 +4,7 @@ from loguru import logger
 from typing import Literal, Optional
 import json
 import time
+import secrets
 from hashlib import sha256
 
 from app.config import settings
@@ -40,7 +41,15 @@ def health_check():
     }
 
 @app.post("/debug/cache/clear")
-def debug_clear_cache():
+def debug_clear_cache(request: Request):
+    token = (settings.DEBUG_CACHE_CLEAR_TOKEN or "").strip()
+    if not token:
+        raise HTTPException(status_code=403, detail="Cache clear endpoint is disabled")
+
+    provided = (request.headers.get("x-debug-token") or "").strip()
+    if not secrets.compare_digest(provided, token):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
     cleared = clear_cache()
     return {"cleared": cleared}
 

@@ -1,77 +1,68 @@
 # Requirements Specification — Internal Knowledge Assistant
 
-## 1. Business Objectives
+## 1) Business Objectives
 
 - Reduce time spent searching internal documentation
-- Improve consistency and accuracy of internal knowledge access
-- Enable secure use of AI without data leakage risks
+- Improve consistency and traceability of answers
+- Keep proprietary knowledge out of model training/fine-tuning
 
----
-
-## 2. Stakeholders
+## 2) Stakeholders
 
 | Stakeholder | Role |
-|------------|------|
-| Business Users | Ask questions and consume answers |
-| IT / Engineering | Maintain infrastructure and services |
-| Security Team | Ensure data governance and compliance |
-| Product Owner | Define priorities and success metrics |
+|---|---|
+| Business users | Ask questions and consume answers |
+| Engineering | Maintain ingestion, API, UI, deployment |
+| Security | Review data handling and access posture |
+| Product owner | Prioritize scope and quality goals |
 
----
+## 3) Functional Requirements and Implementation Status
 
-## 3. Functional Requirements
+| ID | Requirement | Priority | Current status |
+|---|---|---|---|
+| FR-01 | Users can submit natural-language questions | High | Implemented (`/ask`, Streamlit input) |
+| FR-02 | System retrieves relevant document content (top-k) | High | Implemented (OpenSearch k-NN + hybrid rerank) |
+| FR-03 | System generates answers grounded in retrieved docs | High | Implemented (`extract` and `llm` modes) |
+| FR-04 | System displays source citations | High | Implemented (rank/source/page/page_end/chunk + scores) |
+| FR-05 | Admin can upload documents for ingestion | Medium | **Not implemented as upload UI/API**; ingestion is CLI/module based (`python -m app.ingest`) |
+| FR-06 | System logs queries and response latency | Medium | Implemented (`ASK_SPANS`, retrieval sub-spans) |
+| FR-07 | System handles concurrent requests | Medium | Partially addressed by FastAPI/Uvicorn deployment; no formal load test evidence in repo |
+| FR-08 | Users can choose mode: evidence-only vs synthesis | Medium | Implemented (Streamlit toggle + API `mode`) |
+| FR-09 | Users can toggle query rewrite | Medium | Implemented (`query-rewrite-enabled`) |
+| FR-10 | Admin can clear LLM cache (debug) | Low | Implemented (`POST /debug/cache/clear`) |
 
-| ID | Requirement | Priority |
-|----|------------|----------|
-| FR-01 | Users can submit natural-language questions | High |
-| FR-02 | System retrieves relevant document content (top‑k) | High |
-| FR-03 | System generates answers grounded in retrieved documents | High |
-| FR-04 | System displays source citations | High |
-| FR-05 | Admin can upload documents for ingestion | Medium |
-| FR-06 | System logs queries and response latency | Medium |
-| FR-07 | System handles concurrent requests | Medium |
-| FR-08 | Users can choose mode: evidence-only vs synthesis | Medium |
-| FR-09 | Users can toggle query rewrite | Medium |
-| FR-10 | Admin can clear LLM cache (debug) | Low |
-
----
-
-## 4. Non-Functional Requirements
+## 4) Non-Functional Requirements and Current Reality
 
 ### Performance
-- p95 response latency < 3 seconds
-- Support at least 100 concurrent users (scalable)
-
-### Security
-- No fine-tuning on proprietary data
-- Secure API communication (HTTPS)
-- Controlled document access (future)
+- Target: p95 < 3s
+- Current: variable by mode/question; retrieval can be sub-second to ~3s+, and LLM synthesis commonly adds ~1.5–4s.
 
 ### Scalability
-- Horizontal scaling without architectural changes
-- Modular service design
+- Architecture is modular and containerized.
+- OpenSearch-based retrieval supports scale-up/scale-out better than prior local FAISS path.
+- Horizontal scaling is possible, but cache is currently in-memory per API process.
 
-### Reliability
-- Graceful handling of LLM API failures
-- Logging and monitoring for observability
- - Deterministic behavior across runs when cache is cleared
+### Security
+- No fine-tuning on proprietary data (implemented).
+- HTTPS/TLS termination is **not configured in current compose stack** (nginx serves port 80).
+- Fine-grained document access control / auth is **not implemented**.
 
----
+### Reliability / Observability
+- Graceful LLM fallback path exists (`I don’t know based on the provided documents.`).
+- Request-level timing and logging are implemented.
+- Deterministic behavior is limited by LLM generation/caching characteristics; not guaranteed strictly across runs.
 
-## 5. Out of Scope (MVP)
+## 5) Out of Scope (MVP)
 
 - Voice interfaces
 - External customer access
-- Real-time document editing
-- Advanced user management and roles
+- Real-time collaborative document editing
+- Advanced role-based access and auth workflows
 
----
+## 6) Risks and Mitigations
 
-## 6. Risks & Mitigations
-
-| Risk | Mitigation |
-|----|------------|
-| AI hallucination | Retrieval-augmented generation |
-| Data leakage | No model fine-tuning, access control |
-| High cloud cost | Token limits, caching |
-| Latency spikes | Async processing, optimized retrieval |
+| Risk | Current mitigation |
+|---|---|
+| Hallucination | Retrieval-grounded prompting + citation constraints |
+| Retrieval drift on nuanced queries | Hybrid scoring + query rewrite toggle + evaluation set testing |
+| Latency spikes | Embedding model warm-up at startup, caching, retrieval instrumentation |
+| Operational complexity | Containerized deployment and centralized service boundaries |

@@ -17,6 +17,7 @@ class Settings:
     FAISS_INDEX_PATH: str = os.getenv("FAISS_INDEX_PATH", "data/faiss.index")
     META_PATH: str = os.getenv("META_PATH", "data/meta.json")
     MAX_ANSWER_TOKENS: int = int(os.getenv("MAX_ANSWER_TOKENS", "250"))
+    DEBUG_CACHE_CLEAR_TOKEN: str = os.getenv("DEBUG_CACHE_CLEAR_TOKEN", "")
     
     VECTOR_STORE: str = os.getenv("VECTOR_STORE", "faiss")
     OPENSEARCH_HOST: str = os.getenv("OPENSEARCH_HOST", "")

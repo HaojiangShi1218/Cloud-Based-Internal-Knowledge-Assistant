@@ -5,6 +5,7 @@ import streamlit as st
 # --- Config ---
 # BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 API_URL = os.getenv("API_URL", "http://api:8000")
+DEBUG_CACHE_CLEAR_TOKEN = os.getenv("DEBUG_CACHE_CLEAR_TOKEN", "")
 
 st.set_page_config(page_title="Knowledge Assistant", page_icon="🔎", layout="centered")
 
@@ -30,7 +31,10 @@ with st.sidebar:
     if st.button("Clear LLM Cache", use_container_width=True):
         try:
             base = st.session_state.get("api_url", API_URL).rstrip("/")
-            resp = requests.post(f"{base}/debug/cache/clear", timeout=10)
+            headers = {}
+            if DEBUG_CACHE_CLEAR_TOKEN:
+                headers["x-debug-token"] = DEBUG_CACHE_CLEAR_TOKEN
+            resp = requests.post(f"{base}/debug/cache/clear", headers=headers, timeout=10)
             if resp.status_code == 200:
                 cleared = resp.json().get("cleared", 0)
                 st.success(f"Cleared {cleared} cached items.")
