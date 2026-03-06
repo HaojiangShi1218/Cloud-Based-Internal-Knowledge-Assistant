@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Header
 from pydantic import BaseModel, Field, root_validator
 from loguru import logger
 from typing import Literal, Optional
@@ -40,13 +40,18 @@ def health_check():
         "environment": settings.ENV
     }
 
-@app.post("/debug/cache/clear")
-def debug_clear_cache(request: Request):
+@app.post(
+    "/debug/cache/clear",
+    responses={403: {"description": "Forbidden (missing/invalid x-debug-token)"}},
+)
+def debug_clear_cache(
+    x_debug_token: Optional[str] = Header(None, alias="x-debug-token"),
+):
     token = (settings.DEBUG_CACHE_CLEAR_TOKEN or "").strip()
     if not token:
         raise HTTPException(status_code=403, detail="Cache clear endpoint is disabled")
 
-    provided = (request.headers.get("x-debug-token") or "").strip()
+    provided = (x_debug_token or "").strip()
     if not secrets.compare_digest(provided, token):
         raise HTTPException(status_code=403, detail="Forbidden")
 
