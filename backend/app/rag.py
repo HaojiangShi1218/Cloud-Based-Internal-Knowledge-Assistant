@@ -56,16 +56,40 @@ _LIST_LEAD_RE = re.compile(
 )
 _BETWEEN_RE = re.compile(r"\bbetween\b[^.]{0,120}\band\b[^.]{0,120}", re.IGNORECASE)
 _SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_DOC_TOKEN_CACHE_MAX = 50000
+_DOC_TOKEN_CACHE: Dict[Tuple[str, int], List[str]] = {}
 
 def _tokens(s: str) -> List[str]:
     toks = [t.lower() for t in _WORD_RE.findall(s or "")]
     return [t for t in toks if len(t) >= 3 and t not in _STOPWORDS]
 
-def _lexical_score(query: str, text: str) -> float:
-    qtok = _tokens(query)
+def _token_cache_key(hit: Dict[str, Any]) -> Optional[Tuple[str, int]]:
+    doc_id = hit.get("doc_id")
+    seq = hit.get("doc_chunk_seq")
+    if doc_id and isinstance(seq, int):
+        return str(doc_id), seq
+    return None
+
+def _get_doc_tokens(hit: Dict[str, Any], text: str) -> List[str]:
+    key = _token_cache_key(hit)
+    if key is None:
+        return _tokens(text)
+
+    cached = _DOC_TOKEN_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    toks = _tokens(text)
+    if len(_DOC_TOKEN_CACHE) >= _DOC_TOKEN_CACHE_MAX:
+        _DOC_TOKEN_CACHE.clear()
+    _DOC_TOKEN_CACHE[key] = toks
+    return toks
+
+def _lexical_score(query: str, text: str, qtok: Optional[List[str]] = None, tset: Optional[set] = None) -> float:
+    qtok = qtok if qtok is not None else _tokens(query)
     if not qtok:
         return 0.0
-    tset = set(_tokens(text))
+    tset = tset if tset is not None else set(_tokens(text))
     if not tset:
         return 0.0
     unique_q = set(qtok)
@@ -76,7 +100,9 @@ def _compute_corpus_stats(meta: List[Dict[str, Any]]) -> Dict[str, Any]:
     df: Counter[str] = Counter()
     total_len = 0
     for m in meta:
-        toks = _tokens(m.get("text", ""))
+        toks = m.get("tokens")
+        if not isinstance(toks, list):
+            toks = _tokens(m.get("text", ""))
         total_len += len(toks)
         for t in set(toks):
             df[t] += 1
@@ -92,11 +118,17 @@ def _l2_normalize(arr: np.ndarray) -> np.ndarray:
     norms = np.where(norms == 0, 1.0, norms)
     return arr / norms
 
-def _bm25_score(query: str, text: str, stats: Dict[str, Any]) -> float:
-    qtok = _tokens(query)
+def _bm25_score(
+    query: str,
+    text: str,
+    stats: Dict[str, Any],
+    qtok: Optional[List[str]] = None,
+    toks: Optional[List[str]] = None,
+) -> float:
+    qtok = qtok if qtok is not None else _tokens(query)
     if not qtok:
         return 0.0
-    toks = _tokens(text)
+    toks = toks if toks is not None else _tokens(text)
     if not toks:
         return 0.0
     tf = Counter(toks)
@@ -116,11 +148,16 @@ def _bm25_score(query: str, text: str, stats: Dict[str, Any]) -> float:
 def _bm25_norm(score: float) -> float:
     return score / (score + BM25_NORM)
 
-def _phrase_boost(query: str, text: str) -> float:
-    qtok = list(dict.fromkeys(_tokens(query)))
+def _phrase_boost(
+    query: str,
+    text: str,
+    qtok_unique: Optional[List[str]] = None,
+    text_lower: Optional[str] = None,
+) -> float:
+    qtok = qtok_unique if qtok_unique is not None else list(dict.fromkeys(_tokens(query)))
     if len(qtok) < 2:
         return 0.0
-    t = (text or "").lower()
+    t = text_lower if text_lower is not None else (text or "").lower()
     bonus = 0.0
     for i in range(len(qtok) - 1):
         if f"{qtok[i]} {qtok[i+1]}" in t:
@@ -136,33 +173,44 @@ def _is_yesno_question(query: str) -> bool:
 def _has_negation(text: str) -> bool:
     return bool(_NEGATION_RE.search(text or ""))
 
-def _focus_tokens(query: str) -> List[str]:
-    qtok = list(dict.fromkeys(_tokens(query)))
-    if not qtok:
+def _focus_tokens_from_qtok(qtok: List[str]) -> List[str]:
+    uniq = list(dict.fromkeys(qtok))
+    if not uniq:
         return []
-    # Prefer longer tokens for specificity without hardcoding context terms.
-    qtok = sorted(qtok, key=lambda x: (-len(x), x))
-    return qtok[:8]
+    return sorted(uniq, key=lambda x: (-len(x), x))[:8]
 
-def _focus_coverage(query: str, text: str) -> float:
-    focus = _focus_tokens(query)
+def _focus_tokens(query: str) -> List[str]:
+    return _focus_tokens_from_qtok(_tokens(query))
+
+def _focus_coverage(
+    query: str,
+    text: str,
+    focus: Optional[List[str]] = None,
+    tset: Optional[set] = None,
+) -> float:
+    focus = focus if focus is not None else _focus_tokens(query)
     if not focus:
         return 0.0
-    tset = set(_tokens(text))
+    tset = tset if tset is not None else set(_tokens(text))
     if not tset:
         return 0.0
     hits = sum(1 for t in focus if t in tset)
     return hits / max(1, len(focus))
 
-def _proximity_boost(query: str, text: str) -> float:
+def _proximity_boost(
+    query: str,
+    text: str,
+    qtok_unique: Optional[List[str]] = None,
+    tks: Optional[List[str]] = None,
+) -> float:
     """
     Bonus for query-token co-occurrence within a compact span of text.
     Helps favor chunks where key query terms appear together, not just anywhere.
     """
-    qtok = list(dict.fromkeys(_tokens(query)))
+    qtok = qtok_unique if qtok_unique is not None else list(dict.fromkeys(_tokens(query)))
     if len(qtok) < 2:
         return 0.0
-    tks = [t.lower() for t in _WORD_RE.findall(text or "")]
+    tks = tks if tks is not None else [t.lower() for t in _WORD_RE.findall(text or "")]
     if not tks:
         return 0.0
 
@@ -203,16 +251,23 @@ def _proximity_boost(query: str, text: str) -> float:
     bonus = (coverage * PROXIMITY_COVERAGE_WEIGHT) + (compactness * PROXIMITY_COMPACT_WEIGHT)
     return min(bonus, PROXIMITY_BONUS_CAP)
 
-def _between_boost(query: str, text: str) -> float:
+def _between_boost(
+    query: str,
+    text: str,
+    focus: Optional[List[str]] = None,
+    query_has_between: Optional[bool] = None,
+) -> float:
     """
     Generic boost for 'between ... and ...' constructions when the query
     also asks about 'between'. This is context-agnostic.
     """
-    if "between" not in (query or "").lower():
+    if query_has_between is None:
+        query_has_between = "between" in (query or "").lower()
+    if not query_has_between:
         return 0.0
     if not text:
         return 0.0
-    focus = _focus_tokens(query)
+    focus = focus if focus is not None else _focus_tokens(query)
     if len(focus) < 2:
         return 0.0
     for m in _BETWEEN_RE.finditer(text):
@@ -267,14 +322,21 @@ def _sentence_rerank(query: str, candidates: List[Dict[str, Any]]) -> None:
         c["sentence_score"] = best
         c["final_score"] = float(c.get("final_score", 0.0)) + (SENT_BONUS_WEIGHT * best)
 
-def _yesno_boost(query: str, text: str) -> float:
+def _yesno_boost(
+    query: str,
+    text: str,
+    focus: Optional[List[str]] = None,
+    tset: Optional[set] = None,
+    qneg: Optional[bool] = None,
+    tneg: Optional[bool] = None,
+) -> float:
     if not _is_yesno_question(query):
         return 0.0
-    coverage = _focus_coverage(query, text)
+    coverage = _focus_coverage(query, text, focus=focus, tset=tset)
     bonus = coverage * YESNO_COVERAGE_WEIGHT
 
-    qneg = _has_negation(query)
-    tneg = _has_negation(text)
+    qneg = _has_negation(query) if qneg is None else qneg
+    tneg = _has_negation(text) if tneg is None else tneg
     if tneg:
         bonus += YESNO_NEGATION_BONUS
     if qneg and tneg:
@@ -446,6 +508,18 @@ def retrieve(
                 queries_for_retrieval = rewrites
                 logger.info(f"Query rewrites: {queries_for_retrieval[1:]!r}")
 
+    query_features = []
+    for qv in queries_for_retrieval:
+        qtok = _tokens(qv)
+        query_features.append({
+            "query": qv,
+            "qtok": qtok,
+            "qtok_unique": list(dict.fromkeys(qtok)),
+            "focus": _focus_tokens_from_qtok(qtok),
+            "has_between": "between" in (qv or "").lower(),
+        })
+    qneg = _has_negation(query)
+
     with span("embed_queries", spans):
         q_embs = embed_texts(queries_for_retrieval).astype(np.float32)
         if q_embs.ndim == 1:
@@ -473,31 +547,101 @@ def retrieve(
         logger.info(f"Top OpenSearch (semantic) scores: {[round(float(s), 4) for s in top_sem[:10]]}")
 
     with span("bm25_lexical", spans):
-        os_meta = []
+        candidate_rows = []
         for v in candidate_map.values():
             hit = v["hit"]
-            os_meta.append({"text": hit.get("text", "")})
-        stats = _compute_corpus_stats(os_meta)
+            text = hit.get("text", "")
+            doc_tokens = _get_doc_tokens(hit, text)
+            candidate_rows.append({
+                "hit": hit,
+                "semantic": float(v["semantic"]),
+                "text": text,
+                "text_lower": (text or "").lower(),
+                "word_tokens": [t.lower() for t in _WORD_RE.findall(text or "")],
+                "doc_tokens": doc_tokens,
+                "doc_token_set": set(doc_tokens),
+                "has_negation": _has_negation(text),
+            })
+
+        stats = _compute_corpus_stats([{"tokens": row["doc_tokens"]} for row in candidate_rows])
         logger.info(f"Corpus stats: docs={stats['n_docs']} avgdl={round(stats['avgdl'], 1)} tokens={len(stats['idf'])}")
 
         candidates = []
-        for data in candidate_map.values():
-            m = data["hit"]
-            semantic = float(data["semantic"])
-            text = m.get("text", "")
+        for row in candidate_rows:
+            m = row["hit"]
+            semantic = row["semantic"]
+            text = row["text"]
+            text_lower = row["text_lower"]
+            word_tokens = row["word_tokens"]
+            doc_tokens = row["doc_tokens"]
+            doc_token_set = row["doc_token_set"]
+            tneg = row["has_negation"]
             # Blend lexical scores across original + rewrites.
-            lex_scores = [_lexical_score(qv, text) for qv in queries_for_retrieval]
+            lex_scores = [
+                _lexical_score(
+                    qf["query"],
+                    text,
+                    qtok=qf["qtok"],
+                    tset=doc_token_set,
+                )
+                for qf in query_features
+            ]
             lexical = max(lex_scores) if lex_scores else 0.0
-            bm25_scores = [_bm25_score(qv, text, stats) for qv in queries_for_retrieval]
+            bm25_scores = [
+                _bm25_score(
+                    qf["query"],
+                    text,
+                    stats,
+                    qtok=qf["qtok"],
+                    toks=doc_tokens,
+                )
+                for qf in query_features
+            ]
             bm25 = max(bm25_scores) if bm25_scores else 0.0
             bm25_norm = _bm25_norm(bm25)
-            phrase_scores = [_phrase_boost(qv, text) for qv in queries_for_retrieval]
+            phrase_scores = [
+                _phrase_boost(
+                    qf["query"],
+                    text,
+                    qtok_unique=qf["qtok_unique"],
+                    text_lower=text_lower,
+                )
+                for qf in query_features
+            ]
             phrase = max(phrase_scores) if phrase_scores else 0.0
-            focus_cov = _focus_coverage(queries_for_retrieval[0], text)
-            yesno_bonus = _yesno_boost(query, text)
-            proximity_scores = [_proximity_boost(qv, text) for qv in queries_for_retrieval]
+            focus_cov = _focus_coverage(
+                queries_for_retrieval[0],
+                text,
+                focus=query_features[0]["focus"],
+                tset=doc_token_set,
+            )
+            yesno_bonus = _yesno_boost(
+                query,
+                text,
+                focus=query_features[0]["focus"],
+                tset=doc_token_set,
+                qneg=qneg,
+                tneg=tneg,
+            )
+            proximity_scores = [
+                _proximity_boost(
+                    qf["query"],
+                    text,
+                    qtok_unique=qf["qtok_unique"],
+                    tks=word_tokens,
+                )
+                for qf in query_features
+            ]
             proximity = max(proximity_scores) if proximity_scores else 0.0
-            between_scores = [_between_boost(qv, text) for qv in queries_for_retrieval]
+            between_scores = [
+                _between_boost(
+                    qf["query"],
+                    text,
+                    focus=qf["focus"],
+                    query_has_between=qf["has_between"],
+                )
+                for qf in query_features
+            ]
             between_bonus = max(between_scores) if between_scores else 0.0
             final = semantic + (BM25_ALPHA * bm25_norm) + phrase + yesno_bonus + proximity + between_bonus
             candidates.append({
