@@ -8,6 +8,7 @@ import secrets
 from hashlib import sha256
 
 from app.config import settings
+from app.admin_store import init_admin_store
 from app.rag import retrieve
 from app.formatter import format_answer
 from app.cache import clear_cache
@@ -28,6 +29,7 @@ NO_HITS = (
 
 @app.on_event("startup")
 def on_startup():
+    init_admin_store()
     # Warm local embedding model at startup to avoid first-request latency spikes.
     get_model()
     logger.info("Application startup complete")

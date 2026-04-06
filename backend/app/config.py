@@ -3,6 +3,8 @@ import os
 
 load_dotenv()
 
+_DATA_DIR = os.getenv("DATA_DIR", "data")
+
 class Settings:
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     APP_NAME: str = "Cloud-Based Internal Knowledge Assistant"
@@ -18,6 +20,10 @@ class Settings:
     META_PATH: str = os.getenv("META_PATH", "data/meta.json")
     MAX_ANSWER_TOKENS: int = int(os.getenv("MAX_ANSWER_TOKENS", "250"))
     DEBUG_CACHE_CLEAR_TOKEN: str = os.getenv("DEBUG_CACHE_CLEAR_TOKEN", "")
+    UPLOADS_DIR: str = os.getenv("UPLOADS_DIR", os.path.join(_DATA_DIR, "uploads"))
+    ADMIN_TOKEN: str = os.getenv("ADMIN_TOKEN", "")
+    MAX_UPLOAD_MB: int = int(os.getenv("MAX_UPLOAD_MB", "50"))
+    SQLITE_DB_PATH: str = os.getenv("SQLITE_DB_PATH", os.path.join(_DATA_DIR, "admin_metadata.db"))
     
     VECTOR_STORE: str = os.getenv("VECTOR_STORE", "faiss")
     OPENSEARCH_HOST: str = os.getenv("OPENSEARCH_HOST", "")
