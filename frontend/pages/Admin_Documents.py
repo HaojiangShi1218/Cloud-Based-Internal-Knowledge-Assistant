@@ -22,7 +22,6 @@ def _ensure_state() -> None:
     st.session_state.setdefault("admin_last_job_id", None)
     st.session_state.setdefault("admin_documents_cache", None)
     st.session_state.setdefault("admin_file_uploader_key", "admin_file_uploader_0")
-    st.session_state.setdefault("admin_delete_confirm_id", None)
 
 
 def _admin_headers() -> Dict[str, str]:
@@ -182,6 +181,33 @@ def _friendly_exception_message(exc: Exception) -> str:
             "Confirm the API container is running, then check the Backend URL in Advanced settings."
         )
     return text
+
+
+@st.dialog("Confirm Permanent Delete")
+def _confirm_delete_dialog(doc: Dict[str, Any]) -> None:
+    st.warning(
+        "This permanently deletes the uploaded file and indexed chunks. "
+        "To restore it later, you must upload it again."
+    )
+    st.write(f"File: `{doc['filename']}`")
+    st.caption(
+        f"Status: {doc.get('status')} | Size: {_human_size(doc.get('file_size_bytes'))} | "
+        f"Last ingested: {_format_display_time(doc.get('last_ingested_at'))}"
+    )
+    confirm_col, cancel_col = st.columns(2)
+    with confirm_col:
+        if st.button("Confirm Permanent Delete", use_container_width=True, key=f"confirm_delete_{doc['id']}"):
+            try:
+                _admin_request("DELETE", f"/admin/documents/{doc['id']}")
+                st.session_state["admin_documents_cache"] = None
+                st.session_state["admin_upload_message"] = f"Deleted document #{doc['id']}."
+                st.session_state["admin_upload_message_kind"] = "success"
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+    with cancel_col:
+        if st.button("Cancel", use_container_width=True, key=f"cancel_delete_{doc['id']}"):
+            st.rerun()
 
 
 _ensure_state()
@@ -410,10 +436,6 @@ else:
         key="admin_selected_document",
     )
     selected_doc = doc_options[selected_doc_label]
-    selected_doc_id = selected_doc["id"]
-
-    if st.session_state.get("admin_delete_confirm_id") not in {None, selected_doc_id}:
-        st.session_state["admin_delete_confirm_id"] = None
 
     st.write(f"#{selected_doc['id']} | {selected_doc['filename']} | size={_human_size(selected_doc.get('file_size_bytes'))}")
     st.markdown(f"Status: {_status_badge_html(selected_doc.get('status'))}", unsafe_allow_html=True)
@@ -437,28 +459,5 @@ else:
             except Exception as exc:
                 st.error(str(exc))
     with action_col2:
-        if st.session_state.get("admin_delete_confirm_id") == selected_doc_id:
-            st.warning(
-                "This permanently deletes the uploaded file and indexed chunks. "
-                "To restore it later, you must upload it again."
-            )
-            st.caption(f"Ready to delete: {selected_doc['filename']}")
-            confirm_col, cancel_col = st.columns(2)
-            with confirm_col:
-                if st.button("Confirm Permanent Delete", use_container_width=True, key=f"confirm_delete_{selected_doc_id}"):
-                    try:
-                        _admin_request("DELETE", f"/admin/documents/{selected_doc_id}")
-                        st.session_state["admin_documents_cache"] = None
-                        st.session_state["admin_delete_confirm_id"] = None
-                        st.success(f"Deleted document #{selected_doc_id}.")
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(str(exc))
-            with cancel_col:
-                if st.button("Cancel Delete", use_container_width=True, key=f"cancel_delete_{selected_doc_id}"):
-                    st.session_state["admin_delete_confirm_id"] = None
-                    st.rerun()
-        else:
-            if st.button("Delete Selected Document", use_container_width=True):
-                st.session_state["admin_delete_confirm_id"] = selected_doc_id
-                st.rerun()
+        if st.button("Delete Selected Document", use_container_width=True):
+            _confirm_delete_dialog(selected_doc)
