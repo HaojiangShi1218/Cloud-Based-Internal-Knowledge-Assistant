@@ -331,38 +331,44 @@ else:
     ]
     st.dataframe(table_rows, use_container_width=True, hide_index=True)
 
-    st.markdown("Actions")
-    for doc in docs:
-        with st.container():
-            col_info, col_reingest, col_delete = st.columns([6, 2, 2])
-            with col_info:
-                st.write(
-                    f"#{doc['id']} | {doc['filename']} | status={doc['status']} | "
-                    f"size={_human_size(doc.get('file_size_bytes'))}"
-                )
-                st.caption(
-                    f"Created: {_format_display_time(doc.get('created_at'))} | "
-                    f"Updated: {_format_display_time(doc.get('updated_at'))} | "
-                    f"Last ingested: {_format_display_time(doc.get('last_ingested_at'))}"
-                )
-            with col_reingest:
-                can_reingest = doc.get("status") in {"indexed", "failed", "uploaded"}
-                if st.button("Re-ingest", key=f"reingest_{doc['id']}", use_container_width=True, disabled=not can_reingest):
-                    try:
-                        payload = _admin_request("POST", f"/admin/documents/{doc['id']}/reingest")
-                        job = payload.get("job", {})
-                        st.session_state["admin_last_job_id"] = job.get("id")
-                        st.session_state["admin_documents_cache"] = None
-                        st.success(f"Queued re-ingest job #{job.get('id')} for document #{doc['id']}.")
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(str(exc))
-            with col_delete:
-                if st.button("Delete", key=f"delete_{doc['id']}", use_container_width=True):
-                    try:
-                        _admin_request("DELETE", f"/admin/documents/{doc['id']}")
-                        st.session_state["admin_documents_cache"] = None
-                        st.success(f"Deleted document #{doc['id']}.")
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(str(exc))
+    st.markdown("Selected document actions")
+    doc_options = { _document_label(doc): doc for doc in docs }
+    selected_doc_label = st.selectbox(
+        "Choose a document to manage",
+        options=list(doc_options.keys()),
+        key="admin_selected_document",
+    )
+    selected_doc = doc_options[selected_doc_label]
+
+    st.write(
+        f"#{selected_doc['id']} | {selected_doc['filename']} | status={selected_doc['status']} | "
+        f"size={_human_size(selected_doc.get('file_size_bytes'))}"
+    )
+    st.caption(
+        f"Created: {_format_display_time(selected_doc.get('created_at'))} | "
+        f"Updated: {_format_display_time(selected_doc.get('updated_at'))} | "
+        f"Last ingested: {_format_display_time(selected_doc.get('last_ingested_at'))}"
+    )
+
+    action_col1, action_col2 = st.columns(2)
+    can_reingest = selected_doc.get("status") in {"indexed", "failed", "uploaded"}
+    with action_col1:
+        if st.button("Re-ingest Selected Document", use_container_width=True, disabled=not can_reingest):
+            try:
+                payload = _admin_request("POST", f"/admin/documents/{selected_doc['id']}/reingest")
+                job = payload.get("job", {})
+                st.session_state["admin_last_job_id"] = job.get("id")
+                st.session_state["admin_documents_cache"] = None
+                st.success(f"Queued re-ingest job #{job.get('id')} for document #{selected_doc['id']}.")
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+    with action_col2:
+        if st.button("Delete Selected Document", use_container_width=True):
+            try:
+                _admin_request("DELETE", f"/admin/documents/{selected_doc['id']}")
+                st.session_state["admin_documents_cache"] = None
+                st.success(f"Deleted document #{selected_doc['id']}.")
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
