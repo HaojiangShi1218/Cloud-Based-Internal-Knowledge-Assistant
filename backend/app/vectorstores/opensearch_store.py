@@ -146,3 +146,23 @@ def fetch_doc_seq_chunks(doc_id: str, seq_values: List[int]) -> List[Dict[str, A
             }
         )
     return out
+
+
+def delete_chunks_by_doc_id(doc_id: str) -> int:
+    if not doc_id:
+        return 0
+
+    client = get_os_client()
+    resp = client.delete_by_query(
+        index=settings.OPENSEARCH_INDEX,
+        body={
+            "query": {
+                "term": {
+                    "doc_id": doc_id,
+                }
+            }
+        },
+        refresh=True,
+        conflicts="proceed",
+    )
+    return int(resp.get("deleted", 0))

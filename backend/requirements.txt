@@ -5,6 +5,7 @@ uvicorn[standard]==0.29.0
 
 # Environment & configuration
 python-dotenv==1.0.1
+python-multipart==0.0.9
 
 # OpenAI API
 openai==1.12.0

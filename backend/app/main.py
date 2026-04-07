@@ -1,13 +1,26 @@
-from fastapi import FastAPI, HTTPException, Request, Header
+from fastapi import FastAPI, HTTPException, Request, Header, Depends, BackgroundTasks, UploadFile, File, Query
 from pydantic import BaseModel, Field, root_validator
 from loguru import logger
-from typing import Literal, Optional
+from typing import Literal, Optional, List
 import json
 import time
 import secrets
 from hashlib import sha256
 
 from app.config import settings
+from app.admin_auth import require_admin_token
+from app.admin_jobs import create_job_for_documents, delete_document_assets, run_ingestion_job
+from app.admin_store import (
+    delete_document,
+    get_document,
+    init_admin_store,
+    get_documents,
+    get_ingestion_job,
+    get_job_document_ids,
+    get_running_job,
+    list_documents,
+)
+from app.admin_uploads import validate_upload_files, save_upload_files
 from app.rag import retrieve
 from app.formatter import format_answer
 from app.cache import clear_cache
@@ -28,6 +41,7 @@ NO_HITS = (
 
 @app.on_event("startup")
 def on_startup():
+    init_admin_store()
     # Warm local embedding model at startup to avoid first-request latency spikes.
     get_model()
     logger.info("Application startup complete")
@@ -79,6 +93,160 @@ class AskRequest(BaseModel):
 
     class Config:
         allow_population_by_field_name = True
+
+
+class CreateIngestionJobRequest(BaseModel):
+    document_ids: List[int]
+
+
+@app.post("/admin/uploads/validate")
+async def admin_validate_uploads(
+    files: List[UploadFile] = File(...),
+    _admin: None = Depends(require_admin_token),
+):
+    results = await validate_upload_files(files)
+    return {
+        "valid": all(r["valid"] for r in results),
+        "files": results,
+    }
+
+
+@app.post("/admin/uploads")
+async def admin_upload_files(
+    files: List[UploadFile] = File(...),
+    _admin: None = Depends(require_admin_token),
+):
+    results = await save_upload_files(files)
+    uploaded = [r for r in results if r.get("status") == "uploaded"]
+    duplicates = [r for r in results if r.get("status") == "duplicate"]
+    rejected = [r for r in results if r.get("status") == "rejected"]
+    return {
+        "uploaded_count": len(uploaded),
+        "duplicate_count": len(duplicates),
+        "rejected_count": len(rejected),
+        "files": results,
+    }
+
+
+@app.post("/admin/ingestion/jobs")
+def admin_create_ingestion_job(
+    req: CreateIngestionJobRequest,
+    background_tasks: BackgroundTasks,
+    _admin: None = Depends(require_admin_token),
+):
+    document_ids = sorted(set(req.document_ids))
+    if not document_ids:
+        raise HTTPException(status_code=400, detail="document_ids is required")
+
+    docs = get_documents(document_ids)
+    if len(docs) != len(document_ids):
+        raise HTTPException(status_code=404, detail="One or more document IDs were not found")
+
+    invalid = [doc["id"] for doc in docs if doc.get("status") != "uploaded"]
+    if invalid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Only documents with status 'uploaded' can be ingested in this phase: {invalid}",
+        )
+
+    try:
+        job = create_job_for_documents(document_ids)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    background_tasks.add_task(run_ingestion_job, int(job["id"]), document_ids)
+    return {
+        "job": job,
+        "document_ids": document_ids,
+    }
+
+
+@app.post("/admin/documents/{document_id}/reingest")
+def admin_reingest_document(
+    document_id: int,
+    background_tasks: BackgroundTasks,
+    _admin: None = Depends(require_admin_token),
+):
+    doc = get_document(document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    stored_path = doc.get("stored_path")
+    if not stored_path:
+        raise HTTPException(status_code=400, detail="Document has no stored file path")
+
+    from pathlib import Path
+    if not Path(stored_path).exists():
+        raise HTTPException(status_code=400, detail="Stored file is missing on disk")
+
+    try:
+        job = create_job_for_documents([document_id], message="Re-ingest queued")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    background_tasks.add_task(run_ingestion_job, int(job["id"]), [document_id])
+    return {
+        "job": job,
+        "document_ids": [document_id],
+    }
+
+
+@app.get("/admin/ingestion/jobs/{job_id}")
+def admin_get_ingestion_job(
+    job_id: int,
+    _admin: None = Depends(require_admin_token),
+):
+    job = get_ingestion_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    document_ids = get_job_document_ids(job_id)
+    documents = get_documents(document_ids)
+    return {
+        "job": job,
+        "documents": documents,
+    }
+
+
+@app.get("/admin/documents")
+def admin_list_documents(
+    limit: int = Query(200, ge=1, le=1000),
+    _admin: None = Depends(require_admin_token),
+):
+    return {
+        "documents": list_documents(limit=limit),
+    }
+
+
+@app.delete("/admin/documents/{document_id}")
+def admin_delete_document(
+    document_id: int,
+    _admin: None = Depends(require_admin_token),
+):
+    doc = get_document(document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    running = get_running_job()
+    if running:
+        linked_ids = set(get_job_document_ids(int(running["id"])))
+        if document_id in linked_ids:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot delete document while ingestion job {running['id']} is active",
+            )
+
+    cleanup = delete_document_assets(document_id)
+    deleted = delete_document(document_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    return {
+        "deleted": True,
+        "document_id": document_id,
+        "file_deleted": cleanup["file_deleted"],
+        "deleted_chunks": cleanup["deleted_chunks"],
+    }
 
 @app.post("/ask")
 def ask(req: AskRequest, request: Request):

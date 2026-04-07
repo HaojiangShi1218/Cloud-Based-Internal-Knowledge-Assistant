@@ -23,12 +23,13 @@
 | FR-02 | System retrieves relevant document content (top-k) | High | Implemented (OpenSearch k-NN + hybrid rerank) |
 | FR-03 | System generates answers grounded in retrieved docs | High | Implemented (`extract` and `llm` modes) |
 | FR-04 | System displays source citations | High | Implemented (rank/source/page/page_end/chunk + scores) |
-| FR-05 | Admin can upload documents for ingestion | Medium | **Not implemented as upload UI/API**; ingestion is CLI/module based (`python -m app.ingest`) |
+| FR-05 | Admin can upload documents for ingestion | Medium | Implemented (admin upload validation/UI/API + background ingestion jobs) |
 | FR-06 | System logs queries and response latency | Medium | Implemented (`ASK_SPANS`, retrieval sub-spans) |
 | FR-07 | System handles concurrent requests | Medium | Partially addressed by FastAPI/Uvicorn deployment; no formal load test evidence in repo |
 | FR-08 | Users can choose mode: evidence-only vs synthesis | Medium | Implemented (Streamlit toggle + API `mode`) |
 | FR-09 | Users can toggle query rewrite | Medium | Implemented (`query-rewrite-enabled`) |
 | FR-10 | Admin can clear LLM cache (debug) | Low | Implemented (`POST /debug/cache/clear`) |
+| FR-11 | Admin can manage uploaded documents (list, re-ingest, delete) | Medium | Implemented (`/api/admin/documents`, re-ingest, hard delete, Streamlit admin UI) |
 
 ## 4) Non-Functional Requirements and Current Reality
 
@@ -45,6 +46,7 @@
 - No fine-tuning on proprietary data (implemented).
 - HTTPS/TLS termination is **not configured in current compose stack** (nginx serves port 80).
 - Fine-grained document access control / auth is **not implemented**.
+- Admin actions are protected by a shared backend token (`X-Admin-Token`), not user-specific auth.
 
 ### Reliability / Observability
 - Graceful LLM fallback path exists (`I don’t know based on the provided documents.`).
@@ -66,3 +68,5 @@
 | Retrieval drift on nuanced queries | Hybrid scoring + query rewrite toggle + evaluation set testing |
 | Latency spikes | Embedding model warm-up at startup, caching, retrieval instrumentation |
 | Operational complexity | Containerized deployment and centralized service boundaries |
+| Admin misuse / accidental deletion | Token-protected admin endpoints + UI delete confirmation |
+| Stale index data after file replacement | Old `doc_id` cleanup during replacement and re-ingestion |

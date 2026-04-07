@@ -7,10 +7,14 @@ import streamlit as st
 API_URL = os.getenv("API_URL", "http://api:8000")
 DEBUG_CACHE_CLEAR_TOKEN = os.getenv("DEBUG_CACHE_CLEAR_TOKEN", "")
 
+if "api_url" not in st.session_state:
+    st.session_state["api_url"] = API_URL
+
 st.set_page_config(page_title="Knowledge Assistant", page_icon="🔎", layout="centered")
 
 st.title("Cloud Knowledge Assistant")
 st.caption("Ask questions over your internal docs. Answers include citations for traceability.")
+st.caption("Admin document management is available from the Streamlit page navigation.")
 
 with st.sidebar:
     st.header("Settings")
@@ -27,7 +31,7 @@ with st.sidebar:
         "Query-rewrite generates a few alternative versions of your question to help retrieval. "
         "It can improve answers to implicit or tricky questions."
     )
-    st.text_input("Backend URL", value=API_URL, key="api_url")
+    st.text_input("Backend URL", value=st.session_state.get("api_url", API_URL), key="api_url")
     if st.button("Clear LLM Cache", use_container_width=True):
         try:
             base = st.session_state.get("api_url", API_URL).rstrip("/")

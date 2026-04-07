@@ -14,6 +14,7 @@
 - Controls: mode (`extract` / `llm`), top-k, query rewrite toggle
 - Displays citations including `semantic_score` and `final_score`
 - Supports cache clear action via backend debug endpoint
+- Includes a separate Streamlit admin page for document management
 
 ### API (`backend/app/main.py`)
 - FastAPI app (`root_path="/api"`)
@@ -21,8 +22,17 @@
   - `POST /ask`
   - `POST /debug/cache/clear`
   - `GET /health`
+  - `POST /admin/uploads/validate`
+  - `POST /admin/uploads`
+  - `POST /admin/ingestion/jobs`
+  - `GET /admin/ingestion/jobs/{job_id}`
+  - `GET /admin/documents`
+  - `POST /admin/documents/{document_id}/reingest`
+  - `DELETE /admin/documents/{document_id}`
 - Warms embedding model on startup to reduce cold-start latency
 - Logs full request timings (`ASK_SPANS`) and retrieval timing breakdown
+- Initializes local SQLite metadata store on startup
+- Uses `X-Admin-Token` for admin-only document operations
 
 ### Retrieval (`backend/app/rag.py`)
 - Semantic retrieval: OpenSearch k-NN against `embedding` vectors
@@ -43,15 +53,28 @@
 - Main calls:
   - `knn_search(query_vector, k)`
   - `fetch_doc_seq_chunks(doc_id, seq_values)`
+  - `delete_by_doc_id(doc_id)`
 
 ### Ingestion (`backend/app/ingest.py`)
 - Reads PDFs/txt/md from `DOCS_DIR`
+- Also supports targeted ingestion through reusable path-based ingestion for admin jobs
 - PDF flow uses cleaned page text and sliding window across adjacent pages
 - Chunks text, embeds locally, bulk-indexes to OpenSearch
 - Stored fields include:
   - `doc_id`, `chunk_id`, `doc_chunk_seq`
   - `page`, `page_end`, `source`, `title`, `text`
   - `embedding`, `created_at`
+
+### Admin Metadata + Job Management
+- SQLite metadata store tracks:
+  - `documents`
+  - `ingestion_jobs`
+  - `job_documents`
+- Uploaded PDFs are stored on local disk in `UPLOADS_DIR`
+- Upload flow computes content hash for duplicate detection and document identity
+- Ingestion jobs run as FastAPI background tasks
+- Only one ingestion job is allowed to run at a time
+- Re-ingest uses the stored file path; hard delete removes file, index data, and metadata
 
 ### LLM Synthesis (`backend/app/llm.py`)
 - Uses OpenAI `gpt-4o-mini`
@@ -64,10 +87,12 @@
 1. Ingestion loads docs and creates chunks.
 2. Embeddings are generated locally (`all-MiniLM-L6-v2`).
 3. Chunks are indexed in OpenSearch index (`ika_chunks_v1`).
-4. User sends question to `/api/ask`.
-5. Retrieval runs semantic + hybrid scoring and returns ranked chunks.
-6. `extract` mode formats top evidence; `llm` mode synthesizes constrained answer.
-7. API returns answer + citations with `semantic_score` and `final_score`.
+4. Admin upload flow validates and stores PDFs in `UPLOADS_DIR`, then records metadata in SQLite.
+5. Admin ingestion jobs call the same ingestion core against selected stored files.
+6. User sends question to `/api/ask`.
+7. Retrieval runs semantic + hybrid scoring and returns ranked chunks.
+8. `extract` mode formats top evidence; `llm` mode synthesizes constrained answer.
+9. API returns answer + citations with `semantic_score` and `final_score`.
 
 ## 4) Deployment (Current)
 
@@ -85,8 +110,10 @@ For AWS-managed OpenSearch, set:
 
 ## 5) Known Gaps / Planned Improvements
 
-- No document upload API/UI yet (ingestion is CLI-driven).
-- No auth/RBAC for user or document-level access.
+- Admin auth is a shared token, not user-level auth/RBAC.
+- Uploaded files and metadata are stored locally (disk + SQLite), so current admin workflow is single-node oriented.
 - HTTPS termination is not configured in the checked-in compose setup.
 - Some nuanced question families (tradeoff/negation edge cases) still need ranking calibration.
 - LLM and retrieval latency remain variable by query and context size.
+- No richer admin job history/dashboard beyond current job/document views.
+- No browser-local timezone support; admin UI uses configured display timezone.
