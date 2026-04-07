@@ -182,8 +182,7 @@ st.caption("Follow the steps below to connect, upload PDFs, run ingestion, monit
 
 with st.sidebar:
     st.header("Step 1: Admin Access")
-    st.caption("Connect this page to the admin backend before running upload or document actions.")
-    st.text_input("Backend URL", value=st.session_state.get("api_url", API_URL), key="api_url")
+    st.caption("Connect once, then use the workflow on the main page.")
     token_input = st.text_input(
         "Admin Token",
         value=st.session_state.get("admin_token", ""),
@@ -195,13 +194,28 @@ with st.sidebar:
         st.success("Admin token saved in session state.")
 
     token_saved = bool((st.session_state.get("admin_token") or "").strip())
-    st.caption("Token status: saved" if token_saved else "Token status: not saved")
+    token_label = "Saved" if token_saved else "Not saved"
+    token_fg = "#166534" if token_saved else "#92400e"
+    token_bg = "#dcfce7" if token_saved else "#fef3c7"
+    token_border = "#bbf7d0" if token_saved else "#fde68a"
+    st.markdown(
+        (
+            "<div style='margin-top:0.25rem;'>"
+            "<span style='font-size:0.85rem;color:#6b7280;margin-right:0.45rem;'>Token</span>"
+            f"<span style='display:inline-block;padding:0.1rem 0.5rem;border-radius:999px;"
+            f"font-size:0.8rem;font-weight:600;color:{token_fg};background:{token_bg};"
+            f"border:1px solid {token_border};'>{token_label}</span>"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
 
-    st.divider()
-    auto_refresh = st.checkbox("Auto-refresh active job", value=True)
-    if st.button("Refresh Data", use_container_width=True):
-        st.session_state["admin_documents_cache"] = None
-        st.rerun()
+    with st.expander("Advanced", expanded=False):
+        st.text_input("Backend URL", value=st.session_state.get("api_url", API_URL), key="api_url")
+        auto_refresh = st.checkbox("Auto-refresh job status", value=True)
+        if st.button("Refresh Data", use_container_width=True):
+            st.session_state["admin_documents_cache"] = None
+            st.rerun()
 
 if not (st.session_state.get("admin_token") or "").strip():
     st.warning("Enter and save an admin token in the sidebar to use admin actions.")
