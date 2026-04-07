@@ -319,9 +319,11 @@ if validation_results:
     valid_count = sum(1 for item in validation_files if item.get("valid"))
     invalid_count = len(validation_files) - valid_count
     duplicate_count = sum(1 for item in validation_files if item.get("duplicate"))
-    st.markdown(
-        f"Validation results: {valid_count} valid, {invalid_count} invalid, {duplicate_count} duplicates"
-    )
+    st.markdown("Validation summary")
+    metric_col1, metric_col2, metric_col3 = st.columns(3)
+    metric_col1.metric("Valid files", valid_count)
+    metric_col2.metric("Invalid files", invalid_count)
+    metric_col3.metric("Duplicates", duplicate_count)
     with st.expander("View validation details"):
         st.dataframe(validation_files, use_container_width=True)
 
@@ -330,10 +332,11 @@ if upload_results:
     uploaded_count = int(upload_results.get("uploaded_count") or 0)
     rejected_count = int(upload_results.get("rejected_count") or 0)
     duplicate_count = int(upload_results.get("duplicate_count") or 0)
-    st.markdown(
-        f"Upload results: {uploaded_count} files uploaded successfully, "
-        f"{rejected_count} rejected, {duplicate_count} duplicates"
-    )
+    st.markdown("Upload summary")
+    metric_col1, metric_col2, metric_col3 = st.columns(3)
+    metric_col1.metric("Uploaded", uploaded_count)
+    metric_col2.metric("Rejected", rejected_count)
+    metric_col3.metric("Duplicates", duplicate_count)
     with st.expander("View upload details"):
         st.json(upload_results)
 
