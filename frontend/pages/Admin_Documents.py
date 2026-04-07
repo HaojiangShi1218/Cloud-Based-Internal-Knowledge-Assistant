@@ -1,6 +1,7 @@
 import os
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List
 
 import requests
@@ -109,7 +110,8 @@ def _format_display_time(ts: Any) -> str:
         return "—"
     try:
         parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        local_dt = parsed.astimezone()
+        tz_name = os.getenv("DISPLAY_TIMEZONE") or os.getenv("TZ") or "America/New_York"
+        local_dt = parsed.astimezone(ZoneInfo(tz_name))
         display = local_dt.strftime("%Y-%m-%d %I:%M %p")
         return display.replace(" 0", " ")
     except Exception:
