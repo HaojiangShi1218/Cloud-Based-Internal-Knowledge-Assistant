@@ -1,5 +1,6 @@
 import os
 import time
+from datetime import datetime
 from typing import Any, Dict, List
 
 import requests
@@ -99,6 +100,20 @@ def _human_size(size_bytes: Any) -> str:
     if size_bytes < 1024 * 1024:
         return f"{size_bytes / 1024:.1f} KB"
     return f"{size_bytes / (1024 * 1024):.2f} MB"
+
+
+def _format_display_time(ts: Any) -> str:
+    if not ts:
+        return "—"
+    if not isinstance(ts, str):
+        return "—"
+    try:
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        local_dt = parsed.astimezone()
+        display = local_dt.strftime("%Y-%m-%d %I:%M %p")
+        return display.replace(" 0", " ")
+    except Exception:
+        return ts
 
 
 _ensure_state()
@@ -260,6 +275,10 @@ if last_job_id:
         )
         if job.get("message"):
             st.caption(str(job.get("message")))
+        st.caption(
+            f"Started: {_format_display_time(job.get('started_at'))} | "
+            f"Finished: {_format_display_time(job.get('finished_at'))}"
+        )
         with st.expander("View job details"):
             st.write(
                 {
@@ -297,8 +316,9 @@ else:
             "filename": doc["filename"],
             "status": doc["status"],
             "size": _human_size(doc.get("file_size_bytes")),
-            "updated_at": doc.get("updated_at"),
-            "last_ingested_at": doc.get("last_ingested_at"),
+            "created_at": _format_display_time(doc.get("created_at")),
+            "updated_at": _format_display_time(doc.get("updated_at")),
+            "last_ingested_at": _format_display_time(doc.get("last_ingested_at")),
         }
         for doc in docs
     ]
@@ -314,7 +334,9 @@ else:
                     f"size={_human_size(doc.get('file_size_bytes'))}"
                 )
                 st.caption(
-                    f"Updated: {doc.get('updated_at')} | Last ingested: {doc.get('last_ingested_at')}"
+                    f"Created: {_format_display_time(doc.get('created_at'))} | "
+                    f"Updated: {_format_display_time(doc.get('updated_at'))} | "
+                    f"Last ingested: {_format_display_time(doc.get('last_ingested_at'))}"
                 )
             with col_reingest:
                 can_reingest = doc.get("status") in {"indexed", "failed", "uploaded"}
