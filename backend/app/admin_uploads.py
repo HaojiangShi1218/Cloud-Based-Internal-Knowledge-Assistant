@@ -1,12 +1,17 @@
 import hashlib
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from fastapi import UploadFile
 
-from app.admin_store import create_document, find_document_by_hash, update_document
+from app.admin_store import (
+    create_document,
+    find_document_by_hash,
+    find_latest_document_by_filename,
+    update_document,
+)
 from app.config import settings
+from app.vectorstores.opensearch_store import delete_chunks_by_doc_id
 
 
 def _max_upload_bytes() -> int:
@@ -101,6 +106,39 @@ async def save_upload_files(files: List[UploadFile]) -> List[Dict[str, Any]]:
         with open(stored_path, "wb") as f:
             f.write(data)
 
+        existing_by_name = find_latest_document_by_filename(filename)
+        if existing_by_name and existing_by_name["content_sha256"] != content_sha256:
+            old_path = existing_by_name.get("stored_path")
+            old_doc_id = existing_by_name.get("doc_id")
+            if old_doc_id:
+                delete_chunks_by_doc_id(old_doc_id)
+            if old_path and old_path != str(stored_path):
+                try:
+                    Path(old_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+            document = update_document(
+                int(existing_by_name["id"]),
+                doc_id=None,
+                stored_path=str(stored_path),
+                file_size_bytes=len(data),
+                content_sha256=content_sha256,
+                status="uploaded",
+                validation_error=None,
+                last_ingested_at=None,
+            )
+            results.append(
+                {
+                    "document": document,
+                    "duplicate": False,
+                    "replaced": True,
+                    "status": "uploaded",
+                    "error": None,
+                }
+            )
+            continue
+
         document = create_document(
             filename=filename,
             stored_path=str(stored_path),
@@ -113,6 +151,7 @@ async def save_upload_files(files: List[UploadFile]) -> List[Dict[str, Any]]:
             {
                 "document": document,
                 "duplicate": False,
+                "replaced": False,
                 "status": "uploaded",
                 "error": None,
             }

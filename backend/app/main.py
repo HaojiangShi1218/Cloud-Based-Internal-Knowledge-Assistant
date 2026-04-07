@@ -9,12 +9,15 @@ from hashlib import sha256
 
 from app.config import settings
 from app.admin_auth import require_admin_token
-from app.admin_jobs import create_job_for_documents, run_ingestion_job
+from app.admin_jobs import create_job_for_documents, delete_document_assets, run_ingestion_job
 from app.admin_store import (
+    delete_document,
+    get_document,
     init_admin_store,
     get_documents,
     get_ingestion_job,
     get_job_document_ids,
+    get_running_job,
     list_documents,
 )
 from app.admin_uploads import validate_upload_files, save_upload_files
@@ -158,6 +161,36 @@ def admin_create_ingestion_job(
     }
 
 
+@app.post("/admin/documents/{document_id}/reingest")
+def admin_reingest_document(
+    document_id: int,
+    background_tasks: BackgroundTasks,
+    _admin: None = Depends(require_admin_token),
+):
+    doc = get_document(document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    stored_path = doc.get("stored_path")
+    if not stored_path:
+        raise HTTPException(status_code=400, detail="Document has no stored file path")
+
+    from pathlib import Path
+    if not Path(stored_path).exists():
+        raise HTTPException(status_code=400, detail="Stored file is missing on disk")
+
+    try:
+        job = create_job_for_documents([document_id], message="Re-ingest queued")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    background_tasks.add_task(run_ingestion_job, int(job["id"]), [document_id])
+    return {
+        "job": job,
+        "document_ids": [document_id],
+    }
+
+
 @app.get("/admin/ingestion/jobs/{job_id}")
 def admin_get_ingestion_job(
     job_id: int,
@@ -182,6 +215,37 @@ def admin_list_documents(
 ):
     return {
         "documents": list_documents(limit=limit),
+    }
+
+
+@app.delete("/admin/documents/{document_id}")
+def admin_delete_document(
+    document_id: int,
+    _admin: None = Depends(require_admin_token),
+):
+    doc = get_document(document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    running = get_running_job()
+    if running:
+        linked_ids = set(get_job_document_ids(int(running["id"])))
+        if document_id in linked_ids:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot delete document while ingestion job {running['id']} is active",
+            )
+
+    cleanup = delete_document_assets(document_id)
+    deleted = delete_document(document_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    return {
+        "deleted": True,
+        "document_id": document_id,
+        "file_deleted": cleanup["file_deleted"],
+        "deleted_chunks": cleanup["deleted_chunks"],
     }
 
 @app.post("/ask")

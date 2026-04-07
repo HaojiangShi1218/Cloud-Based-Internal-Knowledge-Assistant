@@ -106,6 +106,21 @@ def find_document_by_hash(content_sha256: str) -> Optional[Dict[str, Any]]:
     return _row_to_dict(row)
 
 
+def find_latest_document_by_filename(filename: str) -> Optional[Dict[str, Any]]:
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM documents
+            WHERE filename = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (filename,),
+        ).fetchone()
+    return _row_to_dict(row)
+
+
 def create_document(
     *,
     filename: str,
@@ -181,6 +196,12 @@ def get_document(document_id: int) -> Optional[Dict[str, Any]]:
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
     return _row_to_dict(row)
+
+
+def delete_document(document_id: int) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+    return cur.rowcount > 0
 
 
 def get_documents(document_ids: List[int]) -> List[Dict[str, Any]]:
