@@ -14,8 +14,11 @@ def _ensure_state() -> None:
     st.session_state.setdefault("admin_token", "")
     st.session_state.setdefault("admin_validation_results", None)
     st.session_state.setdefault("admin_upload_results", None)
+    st.session_state.setdefault("admin_upload_message", None)
+    st.session_state.setdefault("admin_upload_message_kind", "info")
     st.session_state.setdefault("admin_last_job_id", None)
     st.session_state.setdefault("admin_documents_cache", None)
+    st.session_state.setdefault("admin_file_uploader_key", "admin_file_uploader_0")
 
 
 def _admin_headers() -> Dict[str, str]:
@@ -114,16 +117,9 @@ with st.sidebar:
         type="password",
         key="admin_token_input",
     )
-    col_save, col_clear = st.columns(2)
-    with col_save:
-        if st.button("Save Token", use_container_width=True):
-            st.session_state["admin_token"] = token_input.strip()
-            st.success("Admin token saved in session state.")
-    with col_clear:
-        if st.button("Clear Token", use_container_width=True):
-            st.session_state["admin_token"] = ""
-            st.session_state["admin_token_input"] = ""
-            st.info("Admin token cleared.")
+    if st.button("Save Token", use_container_width=True):
+        st.session_state["admin_token"] = token_input.strip()
+        st.success("Admin token saved in session state.")
 
     token_saved = bool((st.session_state.get("admin_token") or "").strip())
     st.caption("Token status: saved" if token_saved else "Token status: not saved")
@@ -142,18 +138,21 @@ uploaded_files = st.file_uploader(
     "Select PDF files",
     type=["pdf"],
     accept_multiple_files=True,
-    key="admin_file_uploader",
+    key=st.session_state["admin_file_uploader_key"],
 )
+st.caption("PDF only. Max 50 MB per file. If a file gets stuck in an error state, use Clear Selected Files.")
 
-upload_col1, upload_col2 = st.columns(2)
+upload_col1, upload_col2, upload_col3 = st.columns(3)
 with upload_col1:
     if st.button("Validate Files", use_container_width=True, disabled=not uploaded_files):
         try:
             result = _admin_request("POST", "/admin/uploads/validate", files=_multipart_files(uploaded_files))
             st.session_state["admin_validation_results"] = result
-            st.success("Validation completed.")
+            st.session_state["admin_upload_message"] = "Validation completed."
+            st.session_state["admin_upload_message_kind"] = "success"
         except Exception as exc:
-            st.error(str(exc))
+            st.session_state["admin_upload_message"] = str(exc)
+            st.session_state["admin_upload_message_kind"] = "error"
 
 with upload_col2:
     if st.button("Upload Files", use_container_width=True, disabled=not uploaded_files):
@@ -161,9 +160,33 @@ with upload_col2:
             result = _admin_request("POST", "/admin/uploads", files=_multipart_files(uploaded_files))
             st.session_state["admin_upload_results"] = result
             st.session_state["admin_documents_cache"] = None
-            st.success("Upload completed.")
+            st.session_state["admin_upload_message"] = "Upload completed."
+            st.session_state["admin_upload_message_kind"] = "success"
         except Exception as exc:
-            st.error(str(exc))
+            st.session_state["admin_upload_message"] = str(exc)
+            st.session_state["admin_upload_message_kind"] = "error"
+
+with upload_col3:
+    if st.button("Clear Selected Files", use_container_width=True, disabled=not uploaded_files):
+        current_key = st.session_state["admin_file_uploader_key"]
+        prefix, _, suffix = current_key.rpartition("_")
+        next_index = int(suffix) + 1 if suffix.isdigit() else 1
+        st.session_state["admin_file_uploader_key"] = f"{prefix}_{next_index}" if prefix else f"admin_file_uploader_{next_index}"
+        st.session_state["admin_validation_results"] = None
+        st.session_state["admin_upload_results"] = None
+        st.session_state["admin_upload_message"] = "Selected files cleared."
+        st.session_state["admin_upload_message_kind"] = "info"
+        st.rerun()
+
+upload_message = st.session_state.get("admin_upload_message")
+if upload_message:
+    kind = st.session_state.get("admin_upload_message_kind", "info")
+    if kind == "success":
+        st.success(upload_message)
+    elif kind == "error":
+        st.error(upload_message)
+    else:
+        st.info(upload_message)
 
 validation_results = st.session_state.get("admin_validation_results")
 if validation_results:
