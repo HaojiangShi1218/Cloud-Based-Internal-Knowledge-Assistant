@@ -1,5 +1,6 @@
 import os
 import time
+from html import escape
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List
@@ -116,6 +117,60 @@ def _format_display_time(ts: Any) -> str:
         return display.replace(" 0", " ")
     except Exception:
         return ts
+
+
+def _status_badge_html(status: Any) -> str:
+    value = str(status or "unknown").strip().lower()
+    colors = {
+        "indexed": ("#166534", "#dcfce7", "#bbf7d0"),
+        "completed": ("#166534", "#dcfce7", "#bbf7d0"),
+        "uploaded": ("#1d4ed8", "#dbeafe", "#bfdbfe"),
+        "queued": ("#1d4ed8", "#dbeafe", "#bfdbfe"),
+        "running": ("#92400e", "#fef3c7", "#fde68a"),
+        "ingesting": ("#92400e", "#fef3c7", "#fde68a"),
+        "failed": ("#991b1b", "#fee2e2", "#fecaca"),
+    }
+    fg, bg, border = colors.get(value, ("#374151", "#f3f4f6", "#d1d5db"))
+    label = escape(value.replace("_", " ").title())
+    return (
+        f"<span style='display:inline-block;padding:0.15rem 0.55rem;border-radius:999px;"
+        f"font-size:0.82rem;font-weight:600;color:{fg};background:{bg};"
+        f"border:1px solid {border};'>{label}</span>"
+    )
+
+
+def _render_document_table(docs: List[Dict[str, Any]]) -> None:
+    rows = []
+    for doc in docs:
+        rows.append(
+            "<tr>"
+            f"<td>{doc['id']}</td>"
+            f"<td>{escape(str(doc['filename']))}</td>"
+            f"<td>{_status_badge_html(doc.get('status'))}</td>"
+            f"<td>{escape(_human_size(doc.get('file_size_bytes')))}</td>"
+            f"<td>{escape(_format_display_time(doc.get('created_at')))}</td>"
+            f"<td>{escape(_format_display_time(doc.get('updated_at')))}</td>"
+            f"<td>{escape(_format_display_time(doc.get('last_ingested_at')))}</td>"
+            "</tr>"
+        )
+    table_html = (
+        "<table style='width:100%; border-collapse:collapse; font-size:0.95rem;'>"
+        "<thead>"
+        "<tr>"
+        "<th style='text-align:left; padding:0.55rem; border-bottom:1px solid #e5e7eb;'>ID</th>"
+        "<th style='text-align:left; padding:0.55rem; border-bottom:1px solid #e5e7eb;'>Filename</th>"
+        "<th style='text-align:left; padding:0.55rem; border-bottom:1px solid #e5e7eb;'>Status</th>"
+        "<th style='text-align:left; padding:0.55rem; border-bottom:1px solid #e5e7eb;'>Size</th>"
+        "<th style='text-align:left; padding:0.55rem; border-bottom:1px solid #e5e7eb;'>Created</th>"
+        "<th style='text-align:left; padding:0.55rem; border-bottom:1px solid #e5e7eb;'>Updated</th>"
+        "<th style='text-align:left; padding:0.55rem; border-bottom:1px solid #e5e7eb;'>Last Ingested</th>"
+        "</tr>"
+        "</thead>"
+        "<tbody>"
+        + "".join(rows)
+        + "</tbody></table>"
+    )
+    st.markdown(table_html, unsafe_allow_html=True)
 
 
 _ensure_state()
@@ -272,7 +327,10 @@ if last_job_id:
         total = int(job.get("total_files") or 0)
         processed = int(job.get("processed_files") or 0)
         progress = (processed / total) if total else 0.0
-        st.caption(f"Last job: #{job.get('id')} | status: {job.get('status')}")
+        st.markdown(
+            f"Last job: #{job.get('id')} {_status_badge_html(job.get('status'))}",
+            unsafe_allow_html=True,
+        )
         st.progress(progress)
         successful = int(job.get("successful_files") or 0)
         failed = int(job.get("failed_files") or 0)
@@ -317,19 +375,7 @@ except Exception as exc:
 if not docs:
     st.info("No uploaded documents found.")
 else:
-    table_rows = [
-        {
-            "id": doc["id"],
-            "filename": doc["filename"],
-            "status": doc["status"],
-            "size": _human_size(doc.get("file_size_bytes")),
-            "created_at": _format_display_time(doc.get("created_at")),
-            "updated_at": _format_display_time(doc.get("updated_at")),
-            "last_ingested_at": _format_display_time(doc.get("last_ingested_at")),
-        }
-        for doc in docs
-    ]
-    st.dataframe(table_rows, use_container_width=True, hide_index=True)
+    _render_document_table(docs)
 
     st.markdown("Selected document actions")
     doc_options = { _document_label(doc): doc for doc in docs }
@@ -340,10 +386,8 @@ else:
     )
     selected_doc = doc_options[selected_doc_label]
 
-    st.write(
-        f"#{selected_doc['id']} | {selected_doc['filename']} | status={selected_doc['status']} | "
-        f"size={_human_size(selected_doc.get('file_size_bytes'))}"
-    )
+    st.write(f"#{selected_doc['id']} | {selected_doc['filename']} | size={_human_size(selected_doc.get('file_size_bytes'))}")
+    st.markdown(f"Status: {_status_badge_html(selected_doc.get('status'))}", unsafe_allow_html=True)
     st.caption(
         f"Created: {_format_display_time(selected_doc.get('created_at'))} | "
         f"Updated: {_format_display_time(selected_doc.get('updated_at'))} | "
