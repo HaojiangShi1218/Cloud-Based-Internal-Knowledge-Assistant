@@ -123,10 +123,11 @@ _ensure_state()
 st.set_page_config(page_title="Admin Documents", page_icon="🗂", layout="wide")
 
 st.title("Admin Document Management")
-st.caption("Validate, upload, ingest, re-ingest, and delete documents through the admin backend.")
+st.caption("Follow the steps below to connect, upload PDFs, run ingestion, monitor progress, and manage documents.")
 
 with st.sidebar:
-    st.header("Admin Access")
+    st.header("Step 1: Admin Access")
+    st.caption("Connect this page to the admin backend before running upload or document actions.")
     st.text_input("Backend URL", value=st.session_state.get("api_url", API_URL), key="api_url")
     token_input = st.text_input(
         "Admin Token",
@@ -150,7 +151,8 @@ with st.sidebar:
 if not (st.session_state.get("admin_token") or "").strip():
     st.warning("Enter and save an admin token in the sidebar to use admin actions.")
 
-st.subheader("Upload")
+st.subheader("Step 2: Validate & Upload Files")
+st.caption("Validate PDFs first, then upload the accepted files into managed storage.")
 uploaded_files = st.file_uploader(
     "Select PDF files",
     type=["pdf"],
@@ -230,7 +232,8 @@ if upload_results:
         st.json(upload_results)
 
 st.divider()
-st.subheader("Ingestion")
+st.subheader("Step 3: Start Ingestion")
+st.caption("Select uploaded or failed documents and queue a background ingestion job.")
 docs: List[Dict[str, Any]] = []
 try:
     docs = _load_documents(force=False)
@@ -259,7 +262,8 @@ if st.button("Start Ingestion Job", use_container_width=True, disabled=not selec
         st.error(str(exc))
 
 st.divider()
-st.subheader("Job Status")
+st.subheader("Step 4: Monitor Job Status")
+st.caption("Track the latest job started from this page and watch progress until completion.")
 last_job_id = st.session_state.get("admin_last_job_id")
 if last_job_id:
     try:
@@ -302,7 +306,8 @@ else:
     st.info("No ingestion job started from this UI session yet.")
 
 st.divider()
-st.subheader("Document Management")
+st.subheader("Step 5: Manage Documents")
+st.caption("Review stored documents, check status, re-ingest when needed, or permanently delete files.")
 try:
     docs = _load_documents(force=True)
 except Exception as exc:
