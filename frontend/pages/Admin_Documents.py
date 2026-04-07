@@ -190,13 +190,27 @@ if upload_message:
 
 validation_results = st.session_state.get("admin_validation_results")
 if validation_results:
-    st.markdown("Validation results")
-    st.dataframe(validation_results.get("files", []), use_container_width=True)
+    validation_files = validation_results.get("files", []) or []
+    valid_count = sum(1 for item in validation_files if item.get("valid"))
+    invalid_count = len(validation_files) - valid_count
+    duplicate_count = sum(1 for item in validation_files if item.get("duplicate"))
+    st.markdown(
+        f"Validation results: {valid_count} valid, {invalid_count} invalid, {duplicate_count} duplicates"
+    )
+    with st.expander("View validation details"):
+        st.dataframe(validation_files, use_container_width=True)
 
 upload_results = st.session_state.get("admin_upload_results")
 if upload_results:
-    st.markdown("Upload results")
-    st.json(upload_results)
+    uploaded_count = int(upload_results.get("uploaded_count") or 0)
+    rejected_count = int(upload_results.get("rejected_count") or 0)
+    duplicate_count = int(upload_results.get("duplicate_count") or 0)
+    st.markdown(
+        f"Upload results: {uploaded_count} files uploaded successfully, "
+        f"{rejected_count} rejected, {duplicate_count} duplicates"
+    )
+    with st.expander("View upload details"):
+        st.json(upload_results)
 
 st.divider()
 st.subheader("Ingestion")
@@ -239,17 +253,25 @@ if last_job_id:
         progress = (processed / total) if total else 0.0
         st.caption(f"Last job: #{job.get('id')} | status: {job.get('status')}")
         st.progress(progress)
-        st.write(
-            {
-                "processed_files": processed,
-                "total_files": total,
-                "successful_files": job.get("successful_files"),
-                "failed_files": job.get("failed_files"),
-                "message": job.get("message"),
-                "started_at": job.get("started_at"),
-                "finished_at": job.get("finished_at"),
-            }
+        successful = int(job.get("successful_files") or 0)
+        failed = int(job.get("failed_files") or 0)
+        st.markdown(
+            f"Processed {processed}/{total} files, {successful} successful, {failed} failed"
         )
+        if job.get("message"):
+            st.caption(str(job.get("message")))
+        with st.expander("View job details"):
+            st.write(
+                {
+                    "processed_files": processed,
+                    "total_files": total,
+                    "successful_files": successful,
+                    "failed_files": failed,
+                    "message": job.get("message"),
+                    "started_at": job.get("started_at"),
+                    "finished_at": job.get("finished_at"),
+                }
+            )
         if auto_refresh and job.get("status") in {"queued", "running"}:
             time.sleep(2)
             st.rerun()
