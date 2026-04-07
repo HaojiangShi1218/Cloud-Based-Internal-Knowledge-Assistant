@@ -26,7 +26,7 @@ with st.sidebar:
         "- **Synthesis Mode**: synthesizes answer with AI\n"
     )
     top_k = st.slider("Top K (citations)", min_value=1, max_value=10, value=5, step=1)
-    query_rewrite_enabled = st.checkbox("Query-rewrite", value=True)
+    query_rewrite_enabled = st.checkbox("Query-rewrite", value=False)
     st.caption(
         "Query-rewrite generates a few alternative versions of your question to help retrieval. "
         "It can improve answers to implicit or tricky questions."

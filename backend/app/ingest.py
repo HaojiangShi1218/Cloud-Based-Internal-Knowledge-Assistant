@@ -7,7 +7,7 @@ os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Iterable
+from typing import List, Dict, Any, Tuple, Iterable, Optional, Mapping
 from app.embeddings import embed_texts
 
 from pypdf import PdfReader
@@ -67,10 +67,11 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
         i += max(1, chunk_size - overlap)
     return chunks
 
-def _load_single_document(path: Path) -> Tuple[List[Tuple[str, str, Dict[str, Any]]], Dict[str, Any]]:
+def _load_single_document(path: Path, source_name: Optional[str] = None) -> Tuple[List[Tuple[str, str, Dict[str, Any]]], Dict[str, Any]]:
+    display_name = source_name or path.name
     result: Dict[str, Any] = {
         "path": str(path.resolve()),
-        "filename": path.name,
+        "filename": display_name,
         "doc_id": None,
         "status": "failed",
         "error": None,
@@ -103,7 +104,7 @@ def _load_single_document(path: Path) -> Tuple[List[Tuple[str, str, Dict[str, An
             if max_pages > 0:
                 pages = pages[:max_pages]
 
-            logger.info(f"Ingesting {path.name} doc_id={doc_id[:8]} pages={len(pages)}")
+            logger.info(f"Ingesting {display_name} doc_id={doc_id[:8]} pages={len(pages)}")
             result["pages_processed"] = len(pages)
 
             for i in range(len(pages)):
@@ -124,7 +125,7 @@ def _load_single_document(path: Path) -> Tuple[List[Tuple[str, str, Dict[str, An
 
                 docs.append(
                     (
-                        path.name,
+                        display_name,
                         combined,
                         {
                             "page_num": page_num,
@@ -134,25 +135,33 @@ def _load_single_document(path: Path) -> Tuple[List[Tuple[str, str, Dict[str, An
                     )
                 )
         else:
-            logger.info(f"Ingesting {path.name} doc_id={doc_id[:8]}")
+            logger.info(f"Ingesting {display_name} doc_id={doc_id[:8]}")
             text = path.read_text(encoding="utf-8", errors="ignore")
             if text.strip():
-                docs.append((path.name, text, {"page_num": None, "page_end": None, "doc_id": doc_id}))
+                docs.append((display_name, text, {"page_num": None, "page_end": None, "doc_id": doc_id}))
 
         result["entries_loaded"] = len(docs)
         result["status"] = "loaded" if docs else "empty"
         return docs, result
     except Exception as e:
-        logger.warning(f"Failed reading {path.name}: {e}")
+        logger.warning(f"Failed reading {display_name}: {e}")
         result["error"] = str(e)
         return [], result
 
 
-def _load_documents_from_paths(paths: Iterable[Path]) -> Tuple[List[Tuple[str, str, Dict[str, Any]]], List[Dict[str, Any]]]:
+def _load_documents_from_paths(
+    paths: Iterable[Path],
+    source_names: Optional[Mapping[str, str]] = None,
+) -> Tuple[List[Tuple[str, str, Dict[str, Any]]], List[Dict[str, Any]]]:
     docs: List[Tuple[str, str, Dict[str, Any]]] = []
     results: List[Dict[str, Any]] = []
     for path in paths:
-        loaded_docs, result = _load_single_document(path)
+        source_name = None
+        if source_names:
+            source_name = source_names.get(str(path))
+            if source_name is None:
+                source_name = source_names.get(str(path.resolve()))
+        loaded_docs, result = _load_single_document(path, source_name=source_name)
         docs.extend(loaded_docs)
         results.append(result)
     return docs, results
@@ -287,9 +296,9 @@ def _index_documents(
     }
 
 
-def ingest_paths(paths: Iterable[str]) -> List[Dict[str, Any]]:
+def ingest_paths(paths: Iterable[str], source_names: Optional[Mapping[str, str]] = None) -> List[Dict[str, Any]]:
     resolved_paths = [Path(p) for p in paths]
-    docs, file_results = _load_documents_from_paths(resolved_paths)
+    docs, file_results = _load_documents_from_paths(resolved_paths, source_names=source_names)
     summary = _index_documents(docs, file_results)
     return summary["files"]
 

@@ -10,7 +10,7 @@ class Settings:
     APP_NAME: str = "Cloud-Based Internal Knowledge Assistant"
     ENV: str = os.getenv("ENV", "dev")
 
-    QUERY_REWRITE_ENABLED: bool = os.getenv("QUERY_REWRITE_ENABLED", "1").lower() in {"1", "true", "yes"}
+    QUERY_REWRITE_ENABLED: bool = os.getenv("QUERY_REWRITE_ENABLED", "0").lower() in {"1", "true", "yes"}
     QUERY_REWRITE_MIN_TOKENS: int = 5
     QUERY_REWRITE_K: int = int(os.getenv("QUERY_REWRITE_K", "3"))
 

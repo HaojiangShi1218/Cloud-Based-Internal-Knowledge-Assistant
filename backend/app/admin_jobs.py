@@ -66,7 +66,7 @@ def run_ingestion_job(job_id: int, document_ids: List[int]) -> None:
             delete_chunks_by_doc_id(current_doc_id)
 
         try:
-            results = ingest_paths([stored_path])
+            results = ingest_paths([stored_path], source_names={stored_path: doc.get("filename") or os.path.basename(stored_path)})
             result = results[0] if results else None
         except Exception as exc:
             logger.exception("Background ingestion failed for document {}", doc_id)
