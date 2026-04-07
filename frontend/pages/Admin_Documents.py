@@ -167,7 +167,7 @@ with upload_col2:
             st.session_state["admin_upload_message_kind"] = "error"
 
 with upload_col3:
-    if st.button("Clear Selected Files", use_container_width=True, disabled=not uploaded_files):
+    if st.button("Clear Selected Files", use_container_width=True):
         current_key = st.session_state["admin_file_uploader_key"]
         prefix, _, suffix = current_key.rpartition("_")
         next_index = int(suffix) + 1 if suffix.isdigit() else 1
