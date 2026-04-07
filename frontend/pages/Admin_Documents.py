@@ -22,6 +22,7 @@ def _ensure_state() -> None:
     st.session_state.setdefault("admin_last_job_id", None)
     st.session_state.setdefault("admin_documents_cache", None)
     st.session_state.setdefault("admin_file_uploader_key", "admin_file_uploader_0")
+    st.session_state.setdefault("admin_delete_confirm_id", None)
 
 
 def _admin_headers() -> Dict[str, str]:
@@ -173,6 +174,16 @@ def _render_document_table(docs: List[Dict[str, Any]]) -> None:
     st.markdown(table_html, unsafe_allow_html=True)
 
 
+def _friendly_exception_message(exc: Exception) -> str:
+    text = str(exc)
+    if "HTTPConnectionPool" in text and "api" in text and "Connection refused" in text:
+        return (
+            "The admin backend is not reachable at the configured backend URL. "
+            "Confirm the API container is running, then check the Backend URL in Advanced settings."
+        )
+    return text
+
+
 _ensure_state()
 
 st.set_page_config(page_title="Admin Documents", page_icon="🗂", layout="wide")
@@ -304,10 +315,14 @@ st.divider()
 st.subheader("Step 3: Start Ingestion")
 st.caption("Select uploaded or failed documents and queue a background ingestion job.")
 docs: List[Dict[str, Any]] = []
+documents_error = None
 try:
-    docs = _load_documents(force=False)
+    docs = _load_documents(force=True)
 except Exception as exc:
-    st.error(str(exc))
+    documents_error = _friendly_exception_message(exc)
+
+if documents_error:
+    st.warning(documents_error)
 
 ingest_candidates = [doc for doc in docs if doc.get("status") in {"uploaded", "failed"}]
 selected_labels = st.multiselect(
@@ -380,13 +395,9 @@ else:
 st.divider()
 st.subheader("Step 5: Manage Documents")
 st.caption("Review stored documents, check status, re-ingest when needed, or permanently delete files.")
-try:
-    docs = _load_documents(force=True)
-except Exception as exc:
-    docs = []
-    st.error(str(exc))
-
-if not docs:
+if documents_error:
+    st.info("Document management will be available after the admin backend becomes reachable.")
+elif not docs:
     st.info("No uploaded documents found.")
 else:
     _render_document_table(docs)
@@ -399,6 +410,10 @@ else:
         key="admin_selected_document",
     )
     selected_doc = doc_options[selected_doc_label]
+    selected_doc_id = selected_doc["id"]
+
+    if st.session_state.get("admin_delete_confirm_id") not in {None, selected_doc_id}:
+        st.session_state["admin_delete_confirm_id"] = None
 
     st.write(f"#{selected_doc['id']} | {selected_doc['filename']} | size={_human_size(selected_doc.get('file_size_bytes'))}")
     st.markdown(f"Status: {_status_badge_html(selected_doc.get('status'))}", unsafe_allow_html=True)
@@ -422,11 +437,28 @@ else:
             except Exception as exc:
                 st.error(str(exc))
     with action_col2:
-        if st.button("Delete Selected Document", use_container_width=True):
-            try:
-                _admin_request("DELETE", f"/admin/documents/{selected_doc['id']}")
-                st.session_state["admin_documents_cache"] = None
-                st.success(f"Deleted document #{selected_doc['id']}.")
+        if st.session_state.get("admin_delete_confirm_id") == selected_doc_id:
+            st.warning(
+                "This permanently deletes the uploaded file and indexed chunks. "
+                "To restore it later, you must upload it again."
+            )
+            st.caption(f"Ready to delete: {selected_doc['filename']}")
+            confirm_col, cancel_col = st.columns(2)
+            with confirm_col:
+                if st.button("Confirm Permanent Delete", use_container_width=True, key=f"confirm_delete_{selected_doc_id}"):
+                    try:
+                        _admin_request("DELETE", f"/admin/documents/{selected_doc_id}")
+                        st.session_state["admin_documents_cache"] = None
+                        st.session_state["admin_delete_confirm_id"] = None
+                        st.success(f"Deleted document #{selected_doc_id}.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
+            with cancel_col:
+                if st.button("Cancel Delete", use_container_width=True, key=f"cancel_delete_{selected_doc_id}"):
+                    st.session_state["admin_delete_confirm_id"] = None
+                    st.rerun()
+        else:
+            if st.button("Delete Selected Document", use_container_width=True):
+                st.session_state["admin_delete_confirm_id"] = selected_doc_id
                 st.rerun()
-            except Exception as exc:
-                st.error(str(exc))
