@@ -1,6 +1,6 @@
 import os
 import threading
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from loguru import logger
 
