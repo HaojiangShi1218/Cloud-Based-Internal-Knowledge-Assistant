@@ -7,7 +7,7 @@ os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Iterable
 from app.embeddings import embed_texts
 
 from pypdf import PdfReader
@@ -22,6 +22,7 @@ from collections import defaultdict
 
 CHUNK_SIZE = 2600
 CHUNK_OVERLAP = 600
+SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md"}
 
 def file_sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -66,74 +67,117 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
         i += max(1, chunk_size - overlap)
     return chunks
 
+def _load_single_document(path: Path) -> Tuple[List[Tuple[str, str, Dict[str, Any]]], Dict[str, Any]]:
+    result: Dict[str, Any] = {
+        "path": str(path.resolve()),
+        "filename": path.name,
+        "doc_id": None,
+        "status": "failed",
+        "error": None,
+        "entries_loaded": 0,
+        "chunks_indexed": 0,
+        "pages_processed": 0,
+    }
+
+    if not path.exists():
+        result["error"] = f"File not found: {path}"
+        return [], result
+    if path.is_dir():
+        result["error"] = f"Path is a directory, not a file: {path}"
+        return [], result
+
+    ext = path.suffix.lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        result["status"] = "skipped"
+        result["error"] = f"Unsupported file type: {ext or '<none>'}"
+        return [], result
+
+    docs: List[Tuple[str, str, Dict[str, Any]]] = []
+    try:
+        doc_id = file_sha256(path)
+        result["doc_id"] = doc_id
+
+        if ext == ".pdf":
+            pages = read_pdf_pages(path)
+            max_pages = int(os.getenv("MAX_PAGES_PER_PDF", "0"))
+            if max_pages > 0:
+                pages = pages[:max_pages]
+
+            logger.info(f"Ingesting {path.name} doc_id={doc_id[:8]} pages={len(pages)}")
+            result["pages_processed"] = len(pages)
+
+            for i in range(len(pages)):
+                page_num, page_text = pages[i]
+                page_text = clean_pdf_text(page_text)
+
+                next_text = ""
+                page_end = page_num
+                if i + 1 < len(pages):
+                    next_page_num, next_page_text = pages[i + 1]
+                    next_page_text = clean_pdf_text(next_page_text)
+                    next_text = "\n\n" + next_page_text
+                    page_end = next_page_num
+
+                combined = (page_text + next_text).strip()
+                if not combined:
+                    continue
+
+                docs.append(
+                    (
+                        path.name,
+                        combined,
+                        {
+                            "page_num": page_num,
+                            "page_end": page_end,
+                            "doc_id": doc_id,
+                        },
+                    )
+                )
+        else:
+            logger.info(f"Ingesting {path.name} doc_id={doc_id[:8]}")
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if text.strip():
+                docs.append((path.name, text, {"page_num": None, "page_end": None, "doc_id": doc_id}))
+
+        result["entries_loaded"] = len(docs)
+        result["status"] = "loaded" if docs else "empty"
+        return docs, result
+    except Exception as e:
+        logger.warning(f"Failed reading {path.name}: {e}")
+        result["error"] = str(e)
+        return [], result
+
+
+def _load_documents_from_paths(paths: Iterable[Path]) -> Tuple[List[Tuple[str, str, Dict[str, Any]]], List[Dict[str, Any]]]:
+    docs: List[Tuple[str, str, Dict[str, Any]]] = []
+    results: List[Dict[str, Any]] = []
+    for path in paths:
+        loaded_docs, result = _load_single_document(path)
+        docs.extend(loaded_docs)
+        results.append(result)
+    return docs, results
+
+
 def load_documents(docs_dir: str) -> List[Tuple[str, str, Dict[str, Any]]]:
     docs_path = Path(docs_dir)
     if not docs_path.exists():
         raise FileNotFoundError(f"Docs directory not found: {docs_path.resolve()}")
 
-    docs = []
-    for p in docs_path.rglob("*"):
-        if p.is_dir():
-            continue
-
-        ext = p.suffix.lower()
-
-        try:
-            if ext == ".pdf":
-                doc_id = file_sha256(p)
-                pages = read_pdf_pages(p)
-
-                MAX_PAGES_PER_PDF = int(os.getenv("MAX_PAGES_PER_PDF", "0"))
-                if MAX_PAGES_PER_PDF > 0:
-                    pages = pages[:MAX_PAGES_PER_PDF]
-
-                logger.info(f"Ingesting {p.name} doc_id={doc_id[:8]} pages={len(pages)}")
-
-                # Build sliding windows: page i + page i+1
-                for i in range(len(pages)):
-                    page_num, page_text = pages[i]
-                    page_text = clean_pdf_text(page_text)
-
-                    next_text = ""
-                    page_end = page_num
-
-                    if i + 1 < len(pages):
-                        next_page_num, next_page_text = pages[i + 1]
-                        next_page_text = clean_pdf_text(next_page_text)
-                        next_text = "\n\n" + next_page_text
-                        page_end = next_page_num
-
-                    combined = (page_text + next_text).strip()
-                    if not combined:
-                        continue
-
-                    docs.append(
-                        (
-                            p.name,
-                            combined,
-                            {
-                                "page_num": page_num,      # starting page
-                                "page_end": page_end,      # ending page (same as start if last page)
-                                "doc_id": doc_id,
-                            },
-                        )
-                    )
-
-            elif ext in [".txt", ".md"]:
-                doc_id = file_sha256(p)
-                logger.info(f"Ingesting {p.name} doc_id={doc_id[:8]}")
-
-                text = p.read_text(encoding="utf-8", errors="ignore")
-                if text.strip():
-                    docs.append((p.name, text, {"page_num": None, "page_end": None, "doc_id": doc_id}))
-
-            else:
-                continue  # ignore other files safely
-
-        except Exception as e:
-            logger.warning(f"Failed reading {p.name}: {e}")
-
+    paths = [p for p in docs_path.rglob("*") if p.is_file()]
+    docs, _ = _load_documents_from_paths(paths)
     return docs
+
+
+def _index_documents(
+    docs: List[Tuple[str, str, Dict[str, Any]]],
+    file_results: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not docs:
+        return {
+            "indexed_chunks": 0,
+            "loaded_entries": 0,
+            "files": file_results,
+        }
 
 
 # def embed_texts(texts: List[str]) -> np.ndarray:
@@ -153,23 +197,13 @@ def load_documents(docs_dir: str) -> List[Tuple[str, str, Dict[str, Any]]]:
 #         vectors.extend([d.embedding for d in resp.data])
 
 #     arr = np.array(vectors, dtype=np.float32)
-#     return arr
-
-def main():
-    logger.info(f"Loading documents from: {Path(settings.DOCS_DIR).resolve()}")
-    docs = load_documents(settings.DOCS_DIR)
-    logger.info(f"Loaded {len(docs)} document pages/entries")
-
-    if not docs:
-        logger.error("No documents found. Put PDFs/txt/md into docs/ and retry.")
-        return
-
     BATCH_SIZE = 128
     client = get_os_client()
     index_name = settings.OPENSEARCH_INDEX
     chunk_buf: List[str] = []
     docs_buf: List[Dict[str, Any]] = []
     total = 0
+    doc_chunk_counts: Dict[str, int] = defaultdict(int)
 
     def flush():
         nonlocal total
@@ -232,13 +266,46 @@ def main():
                 }
             )
             doc_seq_counters[doc_id] = doc_seq_counters.get(doc_id, 0) + 1
+            doc_chunk_counts[str(doc_id)] += 1
 
             if len(chunk_buf) >= BATCH_SIZE:
                 flush()
 
     flush()
     client.indices.refresh(index=index_name)
+    for result in file_results:
+        doc_id = result.get("doc_id")
+        result["chunks_indexed"] = doc_chunk_counts.get(str(doc_id), 0) if doc_id else 0
+        if result["status"] == "loaded":
+            result["status"] = "indexed" if result["chunks_indexed"] > 0 else "empty"
+
     logger.success(f"Done. Indexed total={total} into {index_name}")
+    return {
+        "indexed_chunks": total,
+        "loaded_entries": len(docs),
+        "files": file_results,
+    }
+
+
+def ingest_paths(paths: Iterable[str]) -> List[Dict[str, Any]]:
+    resolved_paths = [Path(p) for p in paths]
+    docs, file_results = _load_documents_from_paths(resolved_paths)
+    summary = _index_documents(docs, file_results)
+    return summary["files"]
+
+
+def main():
+    docs_root = Path(settings.DOCS_DIR).resolve()
+    logger.info(f"Loading documents from: {docs_root}")
+    paths = [p for p in docs_root.rglob("*") if p.is_file()]
+    docs, file_results = _load_documents_from_paths(paths)
+    logger.info(f"Loaded {len(docs)} document pages/entries")
+
+    if not docs:
+        logger.error("No documents found. Put PDFs/txt/md into docs/ and retry.")
+        return
+
+    _index_documents(docs, file_results)
 
 if __name__ == "__main__":
     main()
