@@ -312,22 +312,7 @@ def _render_answer(payload: Dict[str, Any]) -> str:
     final_answer = payload["final_answer"].strip()
     if final_answer == NO_ANSWER:
         return NO_ANSWER
-
-    claims = payload.get("claims", [])
-    all_cites = sorted({c for cl in claims for c in cl.get("citations", [])})
-    if all_cites and not _CITE_RE.search(final_answer):
-        final_answer = f"{final_answer} " + "".join(f"[{i}]" for i in all_cites)
-
-    lines = [final_answer]
-    for cl in claims:
-        text = cl.get("claim", "").strip()
-        if not text:
-            continue
-        if text.lower() in final_answer.lower():
-            continue
-        cite = "".join(f"[{i}]" for i in cl.get("citations", []))
-        lines.append(f"- {text} {cite}".strip())
-    return "\n".join(lines)
+    return final_answer
 
 
 def synthesize_answer(

@@ -140,9 +140,10 @@ def _extract_section_for_term(text: str, term: str) -> str:
 
     return ""
 
-def format_answer(hits: List[Dict[str, Any]], question: Optional[str] = None) -> str:
+
+def _select_evidence_hits(hits: List[Dict[str, Any]], question: Optional[str] = None) -> List[Dict[str, Any]]:
     if not hits:
-        return "No evidence found"
+        return []
 
     q = (question or "").strip()
     hits = sorted(hits, key=lambda h: float(h.get("final_score", h.get("score", 0.0))), reverse=True)
@@ -152,21 +153,18 @@ def format_answer(hits: List[Dict[str, Any]], question: Optional[str] = None) ->
 
     qtype = _infer_question_type(q)
 
-    # --- choose answer_hit (used only to seed evidence ordering) ---
     if qtype == "definition":
         term = _extract_term(q)
         answer_hit = _choose_best_hit_for_term(hits, term) if term else hits[0]
     else:
         answer_hit = hits[0]
 
-    # --- Evidence: always include answer_hit first, then fill with other top hits ---
     evidence_hits = [answer_hit]
     for h in hits:
         if len(evidence_hits) >= k:
             break
         if h is answer_hit:
             continue
-        # de-dupe by (source, page_num, chunk_index)
         if any(
             (h.get("source"), h.get("page_num"), h.get("chunk_index"))
             == (eh.get("source"), eh.get("page_num"), eh.get("chunk_index"))
@@ -175,15 +173,41 @@ def format_answer(hits: List[Dict[str, Any]], question: Optional[str] = None) ->
             continue
         evidence_hits.append(h)
 
+    return evidence_hits
+
+
+def _build_evidence_lines(hits: List[Dict[str, Any]], question: Optional[str] = None) -> List[str]:
+    q = (question or "").strip()
+    qtype = _infer_question_type(q)
     evidence_lines = []
-    for h in evidence_hits:
+    for h in hits:
         if qtype == "definition":
             term = _extract_term(q)
             snippet = _extract_section_for_term(h.get("text", ""), term) or _first_sentences(h.get("text", ""), 10)
         else:
             snippet = _first_sentences(h.get("text", ""), 10)
         evidence_lines.append(f"- ({_label(h)}) {snippet}")
+    return evidence_lines
 
-    out = "Answer: See relevant evidence below."
+
+def format_answer_with_evidence(
+    answer_text: str,
+    hits: List[Dict[str, Any]],
+    question: Optional[str] = None,
+    use_all_hits: bool = False,
+) -> str:
+    answer_text = _clean(answer_text) or "See relevant evidence below."
+    if not hits:
+        return f"Answer: {answer_text}"
+
+    evidence_hits = hits if use_all_hits else _select_evidence_hits(hits, question=question)
+    evidence_lines = _build_evidence_lines(evidence_hits, question=question)
+
+    out = f"Answer: {answer_text}"
     out += "\n\nEvidence:\n" + "\n".join(evidence_lines)
     return out
+
+def format_answer(hits: List[Dict[str, Any]], question: Optional[str] = None) -> str:
+    if not hits:
+        return "No evidence found"
+    return format_answer_with_evidence("See relevant evidence below.", hits, question=question, use_all_hits=False)

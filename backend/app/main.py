@@ -22,7 +22,7 @@ from app.admin_store import (
 )
 from app.admin_uploads import validate_upload_files, save_upload_files
 from app.rag import retrieve
-from app.formatter import format_answer
+from app.formatter import format_answer, format_answer_with_evidence
 from app.cache import clear_cache
 from app.embeddings import get_model
 from app.llm import select_llm_hits, synthesize_answer
@@ -283,11 +283,17 @@ def ask(req: AskRequest, request: Request):
             max_toks = max(32, min(max_toks, 400))
 
             with span("synthesize_answer", spans):
-                answer, used_hits = synthesize_answer(
+                synthesized_answer, used_hits = synthesize_answer(
                     q,
                     llm_hits,
                     max_tokens=max_toks,
                 )
+            answer = format_answer_with_evidence(
+                synthesized_answer,
+                used_hits,
+                question=q,
+                use_all_hits=True,
+            ) if synthesized_answer and used_hits else synthesized_answer
             citations_src = used_hits
         else:
             with span("format_answer", spans):
