@@ -6,6 +6,7 @@ STRONG_SCORE = 0.55
 MAX_HITS_WEAK = 2
 MAX_SNIPPET_CHARS = 2000
 MAX_ANSWER_CHARS = 1500
+MAX_VISIBLE_LLM_EVIDENCE = 3
 
 
 def _clean(s: str) -> str:
@@ -21,12 +22,11 @@ def _label(hit: Dict[str, Any]) -> str:
     src = hit.get("source", "unknown")
     p = hit.get("page_num")
     pe = hit.get("page_end", p)
-    ck = hit.get("chunk_index")
     if p is None:
-        return f"{src} — chunk {ck}"
+        return f"Source: {src}"
     if pe is not None and pe != p:
-        return f"{src} p.{p}–{pe} — chunk {ck}"
-    return f"{src} p.{p} — chunk {ck}"
+        return f"Source: {src}, Pages: {p}-{pe}"
+    return f"Source: {src}, Page: {p}"
 
 def _first_sentences(text: str, n: int = 2) -> str:
     t = _clean(text)
@@ -201,6 +201,8 @@ def format_answer_with_evidence(
         return f"Answer: {answer_text}"
 
     evidence_hits = hits if use_all_hits else _select_evidence_hits(hits, question=question)
+    if use_all_hits:
+        evidence_hits = evidence_hits[:MAX_VISIBLE_LLM_EVIDENCE]
     evidence_lines = _build_evidence_lines(evidence_hits, question=question)
 
     out = f"Answer: {answer_text}"
