@@ -30,6 +30,7 @@
 | FR-09 | Users can toggle query rewrite | Medium | Implemented (`query-rewrite-enabled`) |
 | FR-10 | Admin can clear LLM cache (debug) | Low | Implemented (`POST /debug/cache/clear`) |
 | FR-11 | Admin can manage uploaded documents (list, re-ingest, delete) | Medium | Implemented (`/api/admin/documents`, re-ingest, hard delete, Streamlit admin UI) |
+| FR-12 | System can store admin-uploaded source documents in S3 | Medium | Implemented (`DOCUMENT_STORAGE_BACKEND=local/s3`; S3 upload, ingestion, re-ingest, delete verified) |
 
 ## 4) Non-Functional Requirements and Current Reality
 
@@ -41,12 +42,15 @@
 - Architecture is modular and containerized.
 - OpenSearch-based retrieval supports scale-up/scale-out better than prior local FAISS path.
 - Horizontal scaling is possible, but cache is currently in-memory per API process.
+- S3-backed document storage supports durable source-file storage in deployed mode.
+- Admin metadata still uses SQLite, so fully multi-node admin operation would require moving metadata to a managed database.
 
 ### Security
 - No fine-tuning on proprietary data (implemented).
 - HTTPS/TLS termination is **not configured in current compose stack** (nginx serves port 80).
 - Fine-grained document access control / auth is **not implemented**.
 - Admin actions are protected by a shared backend token (`X-Admin-Token`), not user-specific auth.
+- S3 access is expected to use the EC2/API runtime IAM role or equivalent AWS credentials.
 
 ### Reliability / Observability
 - Graceful LLM fallback path exists (`I don’t know based on the provided documents.`).
@@ -70,3 +74,4 @@
 | Operational complexity | Containerized deployment and centralized service boundaries |
 | Admin misuse / accidental deletion | Token-protected admin endpoints + UI delete confirmation |
 | Stale index data after file replacement | Old `doc_id` cleanup during replacement and re-ingestion |
+| S3 object lifecycle drift | Hard delete removes S3 object + OpenSearch chunks + SQLite metadata; missing S3 objects fail re-ingest cleanly |

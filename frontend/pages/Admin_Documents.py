@@ -423,7 +423,7 @@ else:
 
 st.divider()
 st.subheader("Step 5: Manage Documents")
-st.caption("Review stored documents, check status, re-ingest when needed, or permanently delete files.")
+st.caption("Review stored documents, check status, re-ingest when needed, or permanently delete source files/objects.")
 if documents_error:
     st.info("Document management will be available after the admin backend becomes reachable.")
 elif not docs:

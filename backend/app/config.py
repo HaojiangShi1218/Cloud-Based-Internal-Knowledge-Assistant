@@ -24,6 +24,10 @@ class Settings:
     ADMIN_TOKEN: str = os.getenv("ADMIN_TOKEN", "")
     MAX_UPLOAD_MB: int = int(os.getenv("MAX_UPLOAD_MB", "50"))
     SQLITE_DB_PATH: str = os.getenv("SQLITE_DB_PATH", os.path.join(_DATA_DIR, "admin_metadata.db"))
+    DOCUMENT_STORAGE_BACKEND: str = os.getenv("DOCUMENT_STORAGE_BACKEND", "local").strip().lower()
+    S3_BUCKET_NAME: str = os.getenv("S3_BUCKET_NAME", "").strip()
+    S3_PREFIX: str = os.getenv("S3_PREFIX", "documents").strip().strip("/")
+    S3_PRESIGN_EXPIRY_SECONDS: int = int(os.getenv("S3_PRESIGN_EXPIRY_SECONDS", "3600"))
     
     VECTOR_STORE: str = os.getenv("VECTOR_STORE", "faiss")
     OPENSEARCH_HOST: str = os.getenv("OPENSEARCH_HOST", "")

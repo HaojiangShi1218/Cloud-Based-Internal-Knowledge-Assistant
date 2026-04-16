@@ -34,6 +34,16 @@
 - Initializes local SQLite metadata store on startup
 - Uses `X-Admin-Token` for admin-only document operations
 
+### Document Storage (`backend/app/document_storage.py`)
+- Source documents for admin uploads can use either:
+  - `local`: files are stored under `UPLOADS_DIR`
+  - `s3`: files are stored in S3 and S3 is the source of truth
+- S3 object keys are deterministic:
+  - `<S3_PREFIX>/<content_sha256>/<safe_original_filename>`
+- S3 mode stores bucket/key metadata in SQLite and does not depend on a persistent local source-file copy.
+- During S3-backed ingestion/re-ingestion, the API downloads the object to a temporary local file, runs the existing ingestion pipeline, then deletes the temp file.
+- OpenSearch remains the chunk/embedding retrieval index; S3 is only source document storage.
+
 ### Retrieval (`backend/app/rag.py`)
 - Semantic retrieval: OpenSearch k-NN against `embedding` vectors
 - Hybrid rerank features:
@@ -70,11 +80,19 @@
   - `documents`
   - `ingestion_jobs`
   - `job_documents`
-- Uploaded PDFs are stored on local disk in `UPLOADS_DIR`
+- Document metadata includes storage fields:
+  - `storage_backend`
+  - `stored_path`
+  - `s3_bucket`
+  - `s3_key`
+  - `original_filename`
+  - `mime_type`
+- Uploaded PDFs are stored according to `DOCUMENT_STORAGE_BACKEND`
 - Upload flow computes content hash for duplicate detection and document identity
 - Ingestion jobs run as FastAPI background tasks
 - Only one ingestion job is allowed to run at a time
-- Re-ingest uses the stored file path; hard delete removes file, index data, and metadata
+- Re-ingest resolves the stored source document from local disk or S3
+- Hard delete removes the source file/object, OpenSearch chunks, metadata, and related job-document links
 
 ### LLM Synthesis (`backend/app/llm.py`)
 - Uses OpenAI `gpt-4o-mini`
@@ -87,12 +105,16 @@
 1. Ingestion loads docs and creates chunks.
 2. Embeddings are generated locally (`all-MiniLM-L6-v2`).
 3. Chunks are indexed in OpenSearch index (`ika_chunks_v1`).
-4. Admin upload flow validates and stores PDFs in `UPLOADS_DIR`, then records metadata in SQLite.
-5. Admin ingestion jobs call the same ingestion core against selected stored files.
-6. User sends question to `/api/ask`.
-7. Retrieval runs semantic + hybrid scoring and returns ranked chunks.
-8. `extract` mode formats top evidence; `llm` mode synthesizes constrained answer.
-9. API returns answer + citations with `semantic_score` and `final_score`.
+4. Admin upload flow validates PDFs and stores source documents in local storage or S3.
+5. SQLite records document metadata, including storage backend and S3 bucket/key when applicable.
+6. Admin ingestion jobs resolve each source document:
+   - local mode: ingest from `stored_path`
+   - S3 mode: download object to temp file, ingest, clean up temp file
+7. Admin ingestion jobs call the same ingestion core against the resolved local path.
+8. User sends question to `/api/ask`.
+9. Retrieval runs semantic + hybrid scoring and returns ranked chunks.
+10. `extract` mode formats top evidence; `llm` mode synthesizes constrained answer.
+11. API returns answer + citations with `semantic_score` and `final_score`.
 
 ## 4) Deployment (Current)
 
@@ -108,12 +130,28 @@ For AWS-managed OpenSearch, set:
 - `OPENSEARCH_INDEX`
 - `AWS_REGION`
 
+For S3-backed document storage in deployed mode, set:
+- `DOCUMENT_STORAGE_BACKEND=s3`
+- `S3_BUCKET_NAME`
+- `S3_PREFIX`
+- `AWS_REGION`
+
+S3 prerequisites:
+- Bucket must already exist.
+- EC2/API runtime should use an IAM role or equivalent AWS credentials.
+- Required permissions on the configured prefix:
+  - `s3:PutObject`
+  - `s3:GetObject`
+  - `s3:HeadObject`
+  - `s3:DeleteObject`
+
 ## 5) Known Gaps / Planned Improvements
 
 - Admin auth is a shared token, not user-level auth/RBAC.
-- Uploaded files and metadata are stored locally (disk + SQLite), so current admin workflow is single-node oriented.
+- Admin metadata is stored in local SQLite, so fully multi-node admin operation still needs a managed DB.
 - HTTPS termination is not configured in the checked-in compose setup.
 - Some nuanced question families (tradeoff/negation edge cases) still need ranking calibration.
 - LLM and retrieval latency remain variable by query and context size.
 - No richer admin job history/dashboard beyond current job/document views.
 - No browser-local timezone support; admin UI uses configured display timezone.
+- S3 mode stores source documents durably, but the UI does not yet expose presigned source-document download links.

@@ -1,5 +1,6 @@
 import os
 import threading
+from contextlib import contextmanager
 from typing import Any, Dict, List
 
 from loguru import logger
@@ -13,11 +14,61 @@ from app.admin_store import (
     update_ingestion_job,
     utc_now_iso,
 )
+from app.document_storage import delete_s3_object, download_s3_object_to_tempfile, s3_object_exists
 from app.ingest import ingest_paths
 from app.vectorstores.opensearch_store import delete_chunks_by_doc_id
 
 
 _JOB_CREATE_LOCK = threading.Lock()
+
+
+@contextmanager
+def _ingestible_path_for_document(doc: Dict[str, Any]):
+    backend = (doc.get("storage_backend") or "local").lower()
+    if backend == "local":
+        stored_path = doc.get("stored_path")
+        if not stored_path:
+            raise ValueError(f"Document {doc.get('id')} is missing stored_path")
+        yield stored_path
+        return
+
+    if backend == "s3":
+        s3_key = doc.get("s3_key")
+        if not s3_key:
+            raise ValueError(f"Document {doc.get('id')} is missing s3_key")
+        suffix = os.path.splitext(doc.get("original_filename") or doc.get("filename") or ".pdf")[1] or ".pdf"
+        temp_path = download_s3_object_to_tempfile(s3_key, suffix=suffix, bucket_name=doc.get("s3_bucket"))
+        try:
+            yield temp_path
+        finally:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        return
+
+    raise ValueError(f"Unsupported storage_backend for document {doc.get('id')}: {backend}")
+
+
+def document_storage_available(doc: Dict[str, Any]) -> tuple[bool, str]:
+    backend = (doc.get("storage_backend") or "local").lower()
+    if backend == "local":
+        stored_path = doc.get("stored_path")
+        if not stored_path:
+            return False, "Document has no stored file path"
+        if not os.path.exists(stored_path):
+            return False, "Stored file is missing on disk"
+        return True, ""
+
+    if backend == "s3":
+        s3_key = doc.get("s3_key")
+        if not s3_key:
+            return False, "Document has no S3 object key"
+        if not s3_object_exists(s3_key, bucket_name=doc.get("s3_bucket")):
+            return False, "Stored S3 object is missing"
+        return True, ""
+
+    return False, f"Unsupported storage_backend: {backend}"
 
 
 def create_job_for_documents(document_ids: List[int], message: str = "Job queued") -> Dict[str, Any]:
@@ -59,14 +110,15 @@ def run_ingestion_job(job_id: int, document_ids: List[int]) -> None:
 
     for doc in docs:
         doc_id = int(doc["id"])
-        stored_path = doc["stored_path"]
         update_document(doc_id, status="ingesting", validation_error=None)
-        current_doc_id = doc.get("doc_id")
-        if current_doc_id:
-            delete_chunks_by_doc_id(current_doc_id)
 
         try:
-            results = ingest_paths([stored_path], source_names={stored_path: doc.get("filename") or os.path.basename(stored_path)})
+            with _ingestible_path_for_document(doc) as ingest_path:
+                current_doc_id = doc.get("doc_id")
+                if current_doc_id:
+                    delete_chunks_by_doc_id(current_doc_id)
+                source_name = doc.get("original_filename") or doc.get("filename") or os.path.basename(ingest_path)
+                results = ingest_paths([ingest_path], source_names={ingest_path: source_name})
             result = results[0] if results else None
         except Exception as exc:
             logger.exception("Background ingestion failed for document {}", doc_id)
@@ -124,14 +176,20 @@ def delete_document_assets(document_id: int) -> Dict[str, Any]:
         raise ValueError(f"Document not found: {document_id}")
 
     file_deleted = False
-    stored_path = doc.get("stored_path")
-    if stored_path:
-        try:
-            if os.path.exists(stored_path):
-                os.remove(stored_path)
-                file_deleted = True
-        except OSError:
-            file_deleted = False
+    backend = (doc.get("storage_backend") or "local").lower()
+    if backend == "s3":
+        s3_key = doc.get("s3_key")
+        if s3_key:
+            file_deleted = delete_s3_object(s3_key, bucket_name=doc.get("s3_bucket"))
+    else:
+        stored_path = doc.get("stored_path")
+        if stored_path:
+            try:
+                if os.path.exists(stored_path):
+                    os.remove(stored_path)
+                    file_deleted = True
+            except OSError:
+                file_deleted = False
 
     deleted_chunks = 0
     if doc.get("doc_id"):
