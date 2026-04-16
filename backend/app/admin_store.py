@@ -96,8 +96,6 @@ def init_admin_store() -> None:
             CREATE INDEX IF NOT EXISTS idx_documents_doc_id ON documents(doc_id);
             CREATE INDEX IF NOT EXISTS idx_documents_content_sha256 ON documents(content_sha256);
             CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);
-            CREATE INDEX IF NOT EXISTS idx_documents_storage_backend ON documents(storage_backend);
-            CREATE INDEX IF NOT EXISTS idx_documents_s3_key ON documents(s3_key);
 
             CREATE TABLE IF NOT EXISTS ingestion_jobs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,6 +126,12 @@ def init_admin_store() -> None:
             """
         )
         _migrate_documents_table(conn)
+        conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_documents_storage_backend ON documents(storage_backend);
+            CREATE INDEX IF NOT EXISTS idx_documents_s3_key ON documents(s3_key);
+            """
+        )
 
 
 def utc_now_iso() -> str:

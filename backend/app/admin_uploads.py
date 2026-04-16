@@ -1,4 +1,5 @@
 import hashlib
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -11,6 +12,13 @@ from app.admin_store import (
     update_document,
 )
 from app.config import settings
+from app.document_storage import (
+    delete_s3_object,
+    generate_s3_object_key,
+    s3_uri,
+    storage_backend,
+    upload_fileobj_to_s3,
+)
 from app.vectorstores.opensearch_store import delete_chunks_by_doc_id
 
 
@@ -66,14 +74,73 @@ def _stored_upload_path(content_sha256: str, filename: str) -> Path:
     return Path(settings.UPLOADS_DIR) / stored_name
 
 
+def _mime_type(upload: UploadFile) -> str:
+    return upload.content_type or "application/pdf"
+
+
+def _persist_upload(
+    *,
+    filename: str,
+    data: bytes,
+    content_sha256: str,
+    mime_type: str,
+) -> Dict[str, Any]:
+    backend = storage_backend()
+    if backend == "local":
+        stored_path = _stored_upload_path(content_sha256, filename)
+        stored_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(stored_path, "wb") as f:
+            f.write(data)
+        return {
+            "storage_backend": "local",
+            "stored_path": str(stored_path),
+            "s3_bucket": None,
+            "s3_key": None,
+            "original_filename": filename,
+            "mime_type": mime_type,
+        }
+
+    object_key = generate_s3_object_key(filename, content_sha256)
+    upload_fileobj_to_s3(BytesIO(data), object_key, content_type=mime_type)
+    return {
+        "storage_backend": "s3",
+        "stored_path": s3_uri(object_key),
+        "s3_bucket": settings.S3_BUCKET_NAME,
+        "s3_key": object_key,
+        "original_filename": filename,
+        "mime_type": mime_type,
+    }
+
+
+def _cleanup_replaced_storage(existing_doc: Dict[str, Any], new_stored_path: str, new_s3_key: str | None) -> None:
+    backend = (existing_doc.get("storage_backend") or "local").lower()
+    if backend == "s3":
+        old_s3_key = existing_doc.get("s3_key")
+        if old_s3_key and old_s3_key != new_s3_key:
+            try:
+                delete_s3_object(old_s3_key)
+            except Exception:
+                pass
+        return
+
+    old_path = existing_doc.get("stored_path")
+    if old_path and old_path != new_stored_path:
+        try:
+            Path(old_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 async def save_upload_files(files: List[UploadFile]) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
-    uploads_dir = Path(settings.UPLOADS_DIR)
-    uploads_dir.mkdir(parents=True, exist_ok=True)
+    if storage_backend() == "local":
+        uploads_dir = Path(settings.UPLOADS_DIR)
+        uploads_dir.mkdir(parents=True, exist_ok=True)
 
     for upload in files:
         data = await _read_upload_bytes(upload)
         filename = upload.filename or "unnamed.pdf"
+        mime_type = _mime_type(upload)
         valid, error = _validate_file_bytes(filename, data)
         content_sha256 = hashlib.sha256(data).hexdigest() if data else None
 
@@ -102,26 +169,33 @@ async def save_upload_files(files: List[UploadFile]) -> List[Dict[str, Any]]:
             )
             continue
 
-        stored_path = _stored_upload_path(content_sha256, filename)
-        with open(stored_path, "wb") as f:
-            f.write(data)
+        storage_meta = _persist_upload(
+            filename=filename,
+            data=data,
+            content_sha256=content_sha256,
+            mime_type=mime_type,
+        )
 
         existing_by_name = find_latest_document_by_filename(filename)
         if existing_by_name and existing_by_name["content_sha256"] != content_sha256:
-            old_path = existing_by_name.get("stored_path")
             old_doc_id = existing_by_name.get("doc_id")
             if old_doc_id:
                 delete_chunks_by_doc_id(old_doc_id)
-            if old_path and old_path != str(stored_path):
-                try:
-                    Path(old_path).unlink(missing_ok=True)
-                except OSError:
-                    pass
+            _cleanup_replaced_storage(
+                existing_by_name,
+                new_stored_path=storage_meta["stored_path"],
+                new_s3_key=storage_meta.get("s3_key"),
+            )
 
             document = update_document(
                 int(existing_by_name["id"]),
                 doc_id=None,
-                stored_path=str(stored_path),
+                stored_path=storage_meta["stored_path"],
+                storage_backend=storage_meta["storage_backend"],
+                s3_bucket=storage_meta["s3_bucket"],
+                s3_key=storage_meta["s3_key"],
+                original_filename=storage_meta["original_filename"],
+                mime_type=storage_meta["mime_type"],
                 file_size_bytes=len(data),
                 content_sha256=content_sha256,
                 status="uploaded",
@@ -141,7 +215,12 @@ async def save_upload_files(files: List[UploadFile]) -> List[Dict[str, Any]]:
 
         document = create_document(
             filename=filename,
-            stored_path=str(stored_path),
+            stored_path=storage_meta["stored_path"],
+            storage_backend=storage_meta["storage_backend"],
+            s3_bucket=storage_meta["s3_bucket"],
+            s3_key=storage_meta["s3_key"],
+            original_filename=storage_meta["original_filename"],
+            mime_type=storage_meta["mime_type"],
             file_size_bytes=len(data),
             content_sha256=content_sha256,
             status="uploaded",

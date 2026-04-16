@@ -67,13 +67,13 @@ def upload_fileobj_to_s3(
     if hasattr(fileobj, "seek"):
         fileobj.seek(0)
 
-    _s3_client().upload_fileobj(
-        fileobj,
-        bucket,
-        object_key,
-        ExtraArgs=extra_args or None,
-    )
+    kwargs = {"ExtraArgs": extra_args} if extra_args else {}
+    _s3_client().upload_fileobj(fileobj, bucket, object_key, **kwargs)
     return object_key
+
+
+def s3_uri(object_key: str) -> str:
+    return f"s3://{_require_bucket()}/{object_key}"
 
 
 def s3_object_exists(object_key: str) -> bool:
