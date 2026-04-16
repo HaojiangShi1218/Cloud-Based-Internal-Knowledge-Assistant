@@ -118,7 +118,7 @@ def _cleanup_replaced_storage(existing_doc: Dict[str, Any], new_stored_path: str
         old_s3_key = existing_doc.get("s3_key")
         if old_s3_key and old_s3_key != new_s3_key:
             try:
-                delete_s3_object(old_s3_key)
+                delete_s3_object(old_s3_key, bucket_name=existing_doc.get("s3_bucket"))
             except Exception:
                 pass
         return

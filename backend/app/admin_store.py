@@ -69,7 +69,8 @@ def _migrate_documents_table(conn: sqlite3.Connection) -> None:
 
 def init_admin_store() -> None:
     _ensure_parent_dir(settings.SQLITE_DB_PATH)
-    os.makedirs(settings.UPLOADS_DIR, exist_ok=True)
+    if settings.DOCUMENT_STORAGE_BACKEND == "local":
+        os.makedirs(settings.UPLOADS_DIR, exist_ok=True)
 
     with get_conn() as conn:
         conn.executescript(
