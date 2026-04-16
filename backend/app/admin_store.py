@@ -26,6 +26,47 @@ def get_conn() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {row["name"] for row in rows}
+
+
+def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:
+    if column_name not in _table_columns(conn, table_name):
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
+
+
+def _migrate_documents_table(conn: sqlite3.Connection) -> None:
+    _ensure_column(conn, "documents", "storage_backend", "TEXT")
+    _ensure_column(conn, "documents", "s3_bucket", "TEXT")
+    _ensure_column(conn, "documents", "s3_key", "TEXT")
+    _ensure_column(conn, "documents", "original_filename", "TEXT")
+    _ensure_column(conn, "documents", "mime_type", "TEXT")
+
+    conn.execute(
+        """
+        UPDATE documents
+        SET storage_backend = 'local'
+        WHERE storage_backend IS NULL OR storage_backend = ''
+        """
+    )
+    conn.execute(
+        """
+        UPDATE documents
+        SET original_filename = filename
+        WHERE original_filename IS NULL OR original_filename = ''
+        """
+    )
+    conn.execute(
+        """
+        UPDATE documents
+        SET mime_type = 'application/pdf'
+        WHERE (mime_type IS NULL OR mime_type = '')
+          AND lower(filename) LIKE '%.pdf'
+        """
+    )
+
+
 def init_admin_store() -> None:
     _ensure_parent_dir(settings.SQLITE_DB_PATH)
     os.makedirs(settings.UPLOADS_DIR, exist_ok=True)
@@ -38,6 +79,11 @@ def init_admin_store() -> None:
                 doc_id TEXT,
                 filename TEXT NOT NULL,
                 stored_path TEXT NOT NULL,
+                storage_backend TEXT,
+                s3_bucket TEXT,
+                s3_key TEXT,
+                original_filename TEXT,
+                mime_type TEXT,
                 file_size_bytes INTEGER NOT NULL,
                 content_sha256 TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -50,6 +96,8 @@ def init_admin_store() -> None:
             CREATE INDEX IF NOT EXISTS idx_documents_doc_id ON documents(doc_id);
             CREATE INDEX IF NOT EXISTS idx_documents_content_sha256 ON documents(content_sha256);
             CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);
+            CREATE INDEX IF NOT EXISTS idx_documents_storage_backend ON documents(storage_backend);
+            CREATE INDEX IF NOT EXISTS idx_documents_s3_key ON documents(s3_key);
 
             CREATE TABLE IF NOT EXISTS ingestion_jobs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,6 +127,7 @@ def init_admin_store() -> None:
             CREATE INDEX IF NOT EXISTS idx_job_documents_document_id ON job_documents(document_id);
             """
         )
+        _migrate_documents_table(conn)
 
 
 def utc_now_iso() -> str:
@@ -130,6 +179,11 @@ def create_document(
     status: str,
     validation_error: Optional[str] = None,
     doc_id: Optional[str] = None,
+    storage_backend: str = "local",
+    s3_bucket: Optional[str] = None,
+    s3_key: Optional[str] = None,
+    original_filename: Optional[str] = None,
+    mime_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     now = utc_now_iso()
     with get_conn() as conn:
@@ -139,6 +193,11 @@ def create_document(
                 doc_id,
                 filename,
                 stored_path,
+                storage_backend,
+                s3_bucket,
+                s3_key,
+                original_filename,
+                mime_type,
                 file_size_bytes,
                 content_sha256,
                 status,
@@ -146,12 +205,17 @@ def create_document(
                 last_ingested_at,
                 created_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 doc_id,
                 filename,
                 stored_path,
+                storage_backend,
+                s3_bucket,
+                s3_key,
+                original_filename or filename,
+                mime_type,
                 file_size_bytes,
                 content_sha256,
                 status,
@@ -171,6 +235,11 @@ def update_document(document_id: int, **fields: Any) -> Dict[str, Any]:
         "doc_id",
         "filename",
         "stored_path",
+        "storage_backend",
+        "s3_bucket",
+        "s3_key",
+        "original_filename",
+        "mime_type",
         "file_size_bytes",
         "content_sha256",
         "status",
