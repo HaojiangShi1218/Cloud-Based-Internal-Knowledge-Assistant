@@ -9,7 +9,7 @@ from hashlib import sha256
 
 from app.config import settings
 from app.admin_auth import require_admin_token
-from app.admin_jobs import create_job_for_documents, delete_document_assets, run_ingestion_job
+from app.admin_jobs import create_job_for_documents, delete_document_assets, document_storage_available, run_ingestion_job
 from app.admin_store import (
     delete_document,
     get_document,
@@ -171,13 +171,9 @@ def admin_reingest_document(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    stored_path = doc.get("stored_path")
-    if not stored_path:
-        raise HTTPException(status_code=400, detail="Document has no stored file path")
-
-    from pathlib import Path
-    if not Path(stored_path).exists():
-        raise HTTPException(status_code=400, detail="Stored file is missing on disk")
+    available, storage_error = document_storage_available(doc)
+    if not available:
+        raise HTTPException(status_code=400, detail=storage_error)
 
     try:
         job = create_job_for_documents([document_id], message="Re-ingest queued")

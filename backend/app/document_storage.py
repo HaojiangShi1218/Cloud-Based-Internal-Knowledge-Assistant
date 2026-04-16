@@ -24,8 +24,8 @@ def _s3_client():
     return boto3.client("s3", region_name=settings.AWS_REGION)
 
 
-def _require_bucket() -> str:
-    bucket = (settings.S3_BUCKET_NAME or "").strip()
+def _require_bucket(bucket_name: Optional[str] = None) -> str:
+    bucket = (bucket_name or settings.S3_BUCKET_NAME or "").strip()
     if not bucket:
         raise RuntimeError("S3_BUCKET_NAME is required when using S3 document storage")
     return bucket
@@ -72,12 +72,12 @@ def upload_fileobj_to_s3(
     return object_key
 
 
-def s3_uri(object_key: str) -> str:
-    return f"s3://{_require_bucket()}/{object_key}"
+def s3_uri(object_key: str, bucket_name: Optional[str] = None) -> str:
+    return f"s3://{_require_bucket(bucket_name)}/{object_key}"
 
 
-def s3_object_exists(object_key: str) -> bool:
-    bucket = _require_bucket()
+def s3_object_exists(object_key: str, bucket_name: Optional[str] = None) -> bool:
+    bucket = _require_bucket(bucket_name)
     try:
         _s3_client().head_object(Bucket=bucket, Key=object_key)
         return True
@@ -91,15 +91,19 @@ def s3_object_exists(object_key: str) -> bool:
         raise
 
 
-def delete_s3_object(object_key: str) -> bool:
-    bucket = _require_bucket()
-    existed = s3_object_exists(object_key)
+def delete_s3_object(object_key: str, bucket_name: Optional[str] = None) -> bool:
+    bucket = _require_bucket(bucket_name)
+    existed = s3_object_exists(object_key, bucket_name=bucket)
     _s3_client().delete_object(Bucket=bucket, Key=object_key)
     return existed
 
 
-def download_s3_object_to_tempfile(object_key: str, suffix: Optional[str] = None) -> str:
-    bucket = _require_bucket()
+def download_s3_object_to_tempfile(
+    object_key: str,
+    suffix: Optional[str] = None,
+    bucket_name: Optional[str] = None,
+) -> str:
+    bucket = _require_bucket(bucket_name)
     suffix = suffix if suffix is not None else Path(object_key).suffix
     fd, temp_path = tempfile.mkstemp(prefix="ika_doc_", suffix=suffix)
     os.close(fd)
@@ -114,8 +118,12 @@ def download_s3_object_to_tempfile(object_key: str, suffix: Optional[str] = None
         raise
 
 
-def generate_presigned_s3_url(object_key: str, expires_in: Optional[int] = None) -> str:
-    bucket = _require_bucket()
+def generate_presigned_s3_url(
+    object_key: str,
+    expires_in: Optional[int] = None,
+    bucket_name: Optional[str] = None,
+) -> str:
+    bucket = _require_bucket(bucket_name)
     expiry = int(expires_in or settings.S3_PRESIGN_EXPIRY_SECONDS)
     return _s3_client().generate_presigned_url(
         "get_object",
