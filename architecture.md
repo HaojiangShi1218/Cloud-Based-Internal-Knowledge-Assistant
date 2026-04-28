@@ -63,7 +63,7 @@
 - Main calls:
   - `knn_search(query_vector, k)`
   - `fetch_doc_seq_chunks(doc_id, seq_values)`
-  - `delete_by_doc_id(doc_id)`
+  - `delete_chunks_by_doc_id(doc_id)`
 
 ### Ingestion (`backend/app/ingest.py`)
 - Reads PDFs/txt/md from `DOCS_DIR`
@@ -97,7 +97,10 @@
 ### LLM Synthesis (`backend/app/llm.py`)
 - Uses OpenAI `gpt-4o-mini`
 - Strict JSON output schema with claim-level citations
-- Validates claims against retrieved evidence before rendering response
+- Validates claim-level support against retrieved evidence before rendering response
+- User-facing `llm` output is rendered as:
+  - `Answer: <synthesized answer>`
+  - `Evidence:` lines built from the cited chunks used for that answer
 - Uses in-memory cache keyed by question + retrieval signature
 
 ## 3) Data Flow (Current)

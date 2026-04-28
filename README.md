@@ -9,8 +9,8 @@ Internal RAG assistant for document-grounded Q&A with citation traceability.
 - Embeddings are local (`sentence-transformers/all-MiniLM-L6-v2`, 384 dims)
 - Ingestion pipeline indexes chunk text + metadata + embeddings into OpenSearch
 - Two answer modes are supported:
-  - `extract`: evidence-first output
-  - `llm`: synthesized answer with citations
+  - `extract`: evidence-first output rendered as `Answer` + `Evidence`
+  - `llm`: synthesized answer rendered as `Answer` + cited `Evidence`
 
 ## What It Does
 
@@ -51,6 +51,14 @@ All `/api/admin/*` endpoints require header `X-Admin-Token` matching `ADMIN_TOKE
 - `chunk_index`
 - `semantic_score`
 - `final_score`
+
+Rendered answer behavior:
+- `extract` mode returns:
+  - `Answer: See relevant evidence below.`
+  - followed by an `Evidence:` section built from retrieved chunks
+- `llm` mode returns:
+  - `Answer: <synthesized answer>`
+  - followed by an `Evidence:` section built from the cited chunks used for the answer
 
 ## Tech Stack
 
