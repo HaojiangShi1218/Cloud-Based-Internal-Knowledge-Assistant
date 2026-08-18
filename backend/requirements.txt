@@ -24,7 +24,7 @@ loguru==0.7.2
 
 # Retrieval / embeddings
 sentence-transformers==2.7.0
-torch==2.2.2
+torch==2.13.0
 
 # SSL compatibility on macOS LibreSSL builds
 urllib3==1.26.18
